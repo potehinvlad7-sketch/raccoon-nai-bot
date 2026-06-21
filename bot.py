@@ -14,10 +14,13 @@ from dotenv import load_dotenv
 from config_defaults import RESOLUTIONS
 from keyboards import (
     main_menu, settings_menu, model_menu, size_menu, sampler_menu,
-    uc_menu, numeric_menu, modes_menu
+    uc_menu, numeric_menu, modes_menu, admin_menu
 )
 from nai_client import NovelAIClient, NovelAIError
-from storage import get_settings, save_settings, patch_settings
+from storage import (
+    get_settings, save_settings, patch_settings, get_global_nai_token,
+    set_global_nai_token, delete_global_nai_token, get_token_source
+)
 
 load_dotenv()
 
@@ -35,10 +38,27 @@ log = logging.getLogger("novelai_tg_bot")
 
 bot: Bot | None = None
 dp = Dispatcher()
-nai = NovelAIClient(NAI_TOKEN)
+nai = NovelAIClient()
+
+def is_admin(user_id: int | None) -> bool:
+    return user_id in ADMIN_IDS if user_id is not None else False
+
+def user_main_menu(user_id: int | None) -> types.InlineKeyboardMarkup:
+    return main_menu(is_admin(user_id))
+
+def token_status_text() -> str:
+    source = get_token_source()
+    if source == "admin_saved":
+        return "✅ Ключ установлен через админ-панель"
+    if source == "env":
+        return "✅ Используется ключ из .env"
+    return "❌ Ключ не настроен"
 
 class GenState(StatesGroup):
     waiting_prompt = State()
+
+class AdminState(StatesGroup):
+    waiting_nai_token = State()
 
 def settings_text(user_id: int) -> str:
     s = get_settings(user_id)
@@ -66,7 +86,7 @@ async def start(message: types.Message):
         "Нажми 🎨 <b>Генерация</b>, отправь промт обычным сообщением — и я сделаю картинку.\n\n"
         "Команда тоже работает:\n"
         "<code>/gen raccoon girl, pink eyes, sketch, ruins</code>",
-        reply_markup=main_menu(),
+        reply_markup=user_main_menu(message.from_user.id),
         parse_mode="HTML",
     )
 
@@ -124,7 +144,8 @@ async def notify_admins_about_prompt(message: types.Message, prompt: str) -> Non
         f"Sampler: <code>{s.sampler}</code>\\n"
         f"Seed: <code>{s.seed}</code>\\n"
         f"UC preset: <code>{s.uc_preset}</code>\\n"
-        f"Negative: <code>{(s.negative_prompt or '—')[:800]}</code>"
+        f"Negative: <code>{(s.negative_prompt or '—')[:800]}</code>\n"
+        f"🔑 Token source: <code>{get_token_source()}</code>"
     )
 
     for admin_id in ADMIN_IDS:
@@ -143,6 +164,21 @@ async def generate_image_from_prompt(message: types.Message, prompt: str) -> Non
     user_id = user.id
     s = get_settings(user_id)
 
+    token_source = get_token_source()
+    token = get_global_nai_token()
+    if token_source == "missing" or not token:
+        if is_admin(user_id):
+            await message.answer(
+                "⚠️ NovelAI ключ не настроен. Открой 🛠 Админ-панель → 🔑 Установить NovelAI ключ.",
+                reply_markup=user_main_menu(user_id),
+            )
+        else:
+            await message.answer(
+                "⛔ Генерация временно недоступна: NovelAI ключ не настроен.",
+                reply_markup=user_main_menu(user_id),
+            )
+        return
+
     await notify_admins_about_prompt(message, prompt)
 
     wait = await message.answer("🎨 Генерирую...")
@@ -156,7 +192,7 @@ async def generate_image_from_prompt(message: types.Message, prompt: str) -> Non
         image_bytes = bio.getvalue()
 
     try:
-        images = await nai.generate(prompt, s, image_bytes=image_bytes)
+        images = await NovelAIClient(token).generate(prompt, s, image_bytes=image_bytes)
         await wait.delete()
 
         for idx, img in enumerate(images, start=1):
@@ -165,21 +201,21 @@ async def generate_image_from_prompt(message: types.Message, prompt: str) -> Non
                 BufferedInputFile(img, filename=name),
                 caption=f"✅ <b>Готово</b>\\n<code>{prompt[:900]}</code>",
                 parse_mode="HTML",
-                reply_markup=main_menu(),
+                reply_markup=user_main_menu(message.from_user.id),
             )
 
     except NovelAIError as e:
         await wait.edit_text(
             f"❌ Ошибка NovelAI:\\n<code>{str(e)[:3500]}</code>",
             parse_mode="HTML",
-            reply_markup=main_menu(),
+            reply_markup=user_main_menu(message.from_user.id),
         )
     except Exception as e:
         log.exception("Generation failed")
         await wait.edit_text(
             f"❌ Ошибка бота:\\n<code>{str(e)[:3500]}</code>",
             parse_mode="HTML",
-            reply_markup=main_menu(),
+            reply_markup=user_main_menu(message.from_user.id),
         )
 
 
@@ -190,7 +226,7 @@ async def gen_cmd(message: types.Message):
         await message.answer(
             "Напиши так:\n<code>/gen raccoon girl, pink eyes, sketch</code>",
             parse_mode="HTML",
-            reply_markup=main_menu(),
+            reply_markup=user_main_menu(message.from_user.id),
         )
         return
 
@@ -198,7 +234,7 @@ async def gen_cmd(message: types.Message):
 
 @dp.callback_query(F.data == "menu:main")
 async def cb_main(call: types.CallbackQuery):
-    await call.message.edit_text("🦝 Главное меню", reply_markup=main_menu())
+    await call.message.edit_text("🦝 Главное меню", reply_markup=user_main_menu(call.from_user.id))
     await call.answer()
 
 @dp.callback_query(F.data == "menu:settings")
@@ -215,7 +251,7 @@ async def cb_gen(call: types.CallbackQuery, state: FSMContext):
         "Пример:\n"
         "<code>1girl, raccoon ears, pink eyes, ruins, sketch</code>\n\n"
         "Чтобы отменить: /cancel",
-        reply_markup=main_menu(),
+        reply_markup=user_main_menu(call.from_user.id),
         parse_mode="HTML",
     )
     await call.answer()
@@ -228,7 +264,7 @@ async def cb_help(call: types.CallbackQuery):
         "• /settings — меню настроек\n"
         "• reply на фото + /gen prompt — img2img\n\n"
         "Inpaint/Vibe Transfer/Character prompts лучше добавлять следующим слоем, чтобы не превратить старт в болото.",
-        reply_markup=main_menu(),
+        reply_markup=user_main_menu(call.from_user.id),
         parse_mode="HTML",
     )
     await call.answer()
@@ -241,7 +277,7 @@ async def cb_img2img(call: types.CallbackQuery):
         "2. Ответь на неё командой:\n"
         "<code>/gen что нужно получить</code>\n\n"
         "Сейчас strength/noise стоят в коде по умолчанию: 0.55 / 0.10.",
-        reply_markup=main_menu(),
+        reply_markup=user_main_menu(call.from_user.id),
         parse_mode="HTML",
     )
     await call.answer()
@@ -251,7 +287,7 @@ async def cb_presets(call: types.CallbackQuery):
     await call.message.edit_text(
         "🧪 Пресеты будут следующим слоем: ArtRaccoon, botanical, bestiary, pixel, blueprint, macro.\n"
         "База уже готова, их можно хранить как готовые промт-шаблоны.",
-        reply_markup=main_menu(),
+        reply_markup=user_main_menu(call.from_user.id),
     )
     await call.answer()
 
@@ -314,11 +350,63 @@ async def cb_modes(call: types.CallbackQuery):
     )
     await call.answer()
 
+@dp.callback_query(F.data.startswith("admin:"))
+async def cb_admin(call: types.CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        await call.answer("⛔ Недоступно", show_alert=True)
+        return
+
+    action = call.data.split(":", 1)[1]
+    if action == "panel":
+        await call.message.edit_text("🛠 <b>Админ-панель</b>", reply_markup=admin_menu(), parse_mode="HTML")
+    elif action == "set_token":
+        await state.set_state(AdminState.waiting_nai_token)
+        await call.message.edit_text(
+            "🔑 Отправь NovelAI Persistent API Token обычным сообщением.\n\n"
+            "Чтобы отменить: /cancel",
+            reply_markup=admin_menu(),
+        )
+    elif action == "test_token":
+        token = get_global_nai_token()
+        ok = await nai.validate_token(token)
+        await call.message.edit_text(
+            "✅ Ключ работает." if ok else "❌ Ключ не прошёл проверку.",
+            reply_markup=admin_menu(),
+        )
+    elif action == "delete_token":
+        delete_global_nai_token()
+        await state.clear()
+        await call.message.edit_text("🗑 Ключ из админ-панели удалён.", reply_markup=admin_menu())
+    elif action == "token_status":
+        await call.message.edit_text(token_status_text(), reply_markup=admin_menu())
+    await call.answer()
+
+
+@dp.message(AdminState.waiting_nai_token)
+async def admin_token_input(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer("⛔ Недоступно")
+        return
+
+    token = message.text.strip() if message.text else ""
+    if not token:
+        await message.answer("Пришли токен текстом или нажми /cancel.", reply_markup=admin_menu())
+        return
+
+    set_global_nai_token(token)
+    try:
+        await message.delete()
+    except Exception:
+        log.exception("Failed to delete admin token message")
+    await state.clear()
+    await message.answer("✅ NovelAI ключ сохранён.", reply_markup=admin_menu())
+
 
 @dp.message(Command("cancel"))
 async def cancel_cmd(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Отменила ввод промта.", reply_markup=main_menu())
+    await message.answer("Отменила ввод.", reply_markup=user_main_menu(message.from_user.id))
 
 
 @dp.message(GenState.waiting_prompt)

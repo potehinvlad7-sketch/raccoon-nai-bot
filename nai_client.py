@@ -18,13 +18,15 @@ class NovelAIClient:
     лог ошибки будет показан в Telegram. Править чаще всего надо build_payload().
     """
 
-    def __init__(self, token: str):
+    def __init__(self, token: str = ""):
         self.token = token.strip()
         self.base_url = "https://image.novelai.net"
+        self.api_url = "https://api.novelai.net"
 
-    def _headers(self) -> dict:
+    def _headers(self, token: str | None = None) -> dict:
+        auth_token = (token if token is not None else self.token).strip()
         return {
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": f"Bearer {auth_token}",
             "Accept": "application/x-zip-compressed, application/zip, image/png, application/json",
             "Content-Type": "application/json",
             "User-Agent": "ArtRaccoon-NovelAI-Telegram-Bot/0.1",
@@ -94,6 +96,24 @@ class NovelAIClient:
             "action": action,
             "parameters": parameters,
         }
+
+    async def validate_token(self, token: str | None = None) -> bool:
+        auth_token = (token if token is not None else self.token).strip()
+        if not auth_token or auth_token.startswith("PASTE_"):
+            return False
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{self.api_url}/user/subscription",
+                    headers=self._headers(auth_token),
+                )
+        except httpx.HTTPError:
+            return False
+
+        if r.status_code in (401, 403):
+            return False
+        return 200 <= r.status_code < 300
 
     async def generate(
         self,

@@ -4,7 +4,7 @@ from config_defaults import MODELS, RESOLUTIONS, SAMPLERS, UC_PRESETS
 def rows(buttons, width=2):
     return [buttons[i:i+width] for i in range(0, len(buttons), width)]
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(text="🎨 Генерация", callback_data="menu:gen"),
         InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
@@ -12,6 +12,8 @@ def main_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📎 Img2Img", callback_data="menu:img2img"),
         InlineKeyboardButton(text="❔ Помощь", callback_data="menu:help"),
     ]
+    if is_admin:
+        buttons.append(InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin:panel"))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
 
 def settings_menu() -> InlineKeyboardMarkup:
@@ -62,5 +64,16 @@ def modes_menu(furry: bool, background: bool, quality: bool) -> InlineKeyboardMa
         InlineKeyboardButton(text=f"🌄 Background: {'ON' if background else 'OFF'}", callback_data="toggle:background"),
         InlineKeyboardButton(text=f"✨ Quality tags: {'ON' if quality else 'OFF'}", callback_data="toggle:quality"),
         InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+
+def admin_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="🔑 Установить NovelAI ключ", callback_data="admin:set_token"),
+        InlineKeyboardButton(text="🧪 Проверить ключ", callback_data="admin:test_token"),
+        InlineKeyboardButton(text="🗑 Удалить ключ", callback_data="admin:delete_token"),
+        InlineKeyboardButton(text="ℹ️ Статус ключа", callback_data="admin:token_status"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main"),
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
