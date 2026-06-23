@@ -4,3 +4,5 @@ python-dotenv==1.*
 pydantic==2.*
 
 aiohttp_socks==0.*
+
+socksio==1.*

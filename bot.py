@@ -16,13 +16,14 @@ from keyboards import (
     main_menu, settings_menu, model_menu, size_menu, sampler_menu,
     uc_menu, numeric_menu, modes_menu
 )
-from nai_client import NovelAIClient, NovelAIError
+from app.services.nai_client import NovelAIClient, NovelAIError
 from storage import get_settings, save_settings, patch_settings
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-NAI_TOKEN = os.getenv("NAI_TOKEN", "")
+NOVELAI_TOKEN = os.getenv("NOVELAI_TOKEN", "")
+NAI_MODEL = os.getenv("NAI_MODEL", "").strip()
 PROXY_URL = os.getenv("PROXY_URL", "socks5://127.0.0.1:1080").strip()
 ADMIN_IDS = [
     int(x.strip())
@@ -35,7 +36,7 @@ log = logging.getLogger("novelai_tg_bot")
 
 bot: Bot | None = None
 dp = Dispatcher()
-nai = NovelAIClient(NAI_TOKEN)
+nai = NovelAIClient(NOVELAI_TOKEN, default_model=NAI_MODEL, proxy_url=PROXY_URL)
 
 class GenState(StatesGroup):
     waiting_prompt = State()
@@ -65,7 +66,8 @@ async def start(message: types.Message):
         "🦝 <b>NovelAI bot</b>\n\n"
         "Нажми 🎨 <b>Генерация</b>, отправь промт обычным сообщением — и я сделаю картинку.\n\n"
         "Команда тоже работает:\n"
-        "<code>/gen raccoon girl, pink eyes, sketch, ruins</code>",
+        "<code>/gen raccoon girl, pink eyes, sketch, ruins</code>\n"
+        "<code>/draw raccoon girl, pink eyes, sketch, ruins</code>",
         reply_markup=main_menu(),
         parse_mode="HTML",
     )
@@ -75,6 +77,7 @@ async def help_cmd(message: types.Message):
     await message.answer(
         "Команды:\n"
         "/gen prompt — сгенерировать\n"
+        "/draw prompt — сгенерировать\n"
         "/settings — настройки\n"
         "/raw — показать настройки\n"
         "/cancel — отменить ввод промта\n\n"
@@ -141,6 +144,10 @@ async def generate_image_from_prompt(message: types.Message, prompt: str) -> Non
         return
 
     user_id = user.id
+    if ADMIN_IDS and user_id not in ADMIN_IDS:
+        await message.answer("⛔ Генерация доступна только администраторам.", reply_markup=main_menu())
+        return
+
     s = get_settings(user_id)
 
     await notify_admins_about_prompt(message, prompt)
@@ -161,24 +168,33 @@ async def generate_image_from_prompt(message: types.Message, prompt: str) -> Non
 
         for idx, img in enumerate(images, start=1):
             name = f"novelai_{idx}.png"
-            await message.answer_photo(
-                BufferedInputFile(img, filename=name),
-                caption=f"✅ <b>Готово</b>\\n<code>{prompt[:900]}</code>",
-                parse_mode="HTML",
-                reply_markup=main_menu(),
-            )
+            image = BufferedInputFile(img, filename=name)
+            caption = f"✅ <b>Готово</b>\\n<code>{prompt[:900]}</code>"
+            try:
+                await message.answer_photo(
+                    image,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=main_menu(),
+                )
+            except Exception:
+                log.exception("Failed to send image as photo, sending as document")
+                await message.answer_document(
+                    BufferedInputFile(img, filename=name),
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=main_menu(),
+                )
 
     except NovelAIError as e:
         await wait.edit_text(
-            f"❌ Ошибка NovelAI:\\n<code>{str(e)[:3500]}</code>",
-            parse_mode="HTML",
+            f"❌ NovelAI не смог сгенерировать изображение. {str(e)[:3300]}",
             reply_markup=main_menu(),
         )
-    except Exception as e:
+    except Exception:
         log.exception("Generation failed")
         await wait.edit_text(
-            f"❌ Ошибка бота:\\n<code>{str(e)[:3500]}</code>",
-            parse_mode="HTML",
+            "❌ Внутренняя ошибка бота. Попробуй позже или измени промт.",
             reply_markup=main_menu(),
         )
 
@@ -189,6 +205,19 @@ async def gen_cmd(message: types.Message):
     if not prompt:
         await message.answer(
             "Напиши так:\n<code>/gen raccoon girl, pink eyes, sketch</code>",
+            parse_mode="HTML",
+            reply_markup=main_menu(),
+        )
+        return
+
+    await generate_image_from_prompt(message, prompt)
+
+@dp.message(Command("draw"))
+async def draw_cmd(message: types.Message):
+    prompt = message.text.replace("/draw", "", 1).strip() if message.text else ""
+    if not prompt:
+        await message.answer(
+            "Напиши так:\n<code>/draw raccoon girl, pink eyes, sketch</code>",
             parse_mode="HTML",
             reply_markup=main_menu(),
         )
@@ -432,7 +461,7 @@ async def main():
         raise RuntimeError("BOT_TOKEN не заполнен в .env")
 
     if PROXY_URL:
-        log.info("Telegram proxy enabled: %s", PROXY_URL)
+        log.info("Telegram proxy enabled")
         session = AiohttpSession(proxy=PROXY_URL)
         bot = Bot(token=BOT_TOKEN, session=session)
     else:
