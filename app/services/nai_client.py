@@ -61,7 +61,11 @@ class NovelAIClient:
         if settings.negative_prompt.strip():
             uc = (uc + ", " + settings.negative_prompt.strip()).strip(", ")
 
+        built_prompt = self.build_prompt(prompt, settings)
+        is_v4_model = model.startswith(("nai-diffusion-4", "nai-diffusion-4-5"))
+
         parameters = {
+            "params_version": 3,
             "width": settings.width,
             "height": settings.height,
             "scale": settings.scale,
@@ -70,16 +74,32 @@ class NovelAIClient:
             "n_samples": settings.n_samples,
             "ucPreset": 0,
             "qualityToggle": settings.add_quality_tags,
-            "sm": settings.smea,
-            "sm_dyn": settings.smea_dyn,
             "dynamic_thresholding": False,
-            "controlnet_strength": 1.0,
-            "legacy": False,
-            "add_original_image": True,
             "cfg_rescale": settings.cfg_rescale,
             "noise_schedule": settings.noise_schedule,
             "negative_prompt": uc,
         }
+        if is_v4_model:
+            parameters["v4_prompt"] = {
+                "caption": {
+                    "base_caption": built_prompt,
+                    "char_captions": [],
+                },
+                "use_coords": False,
+                "use_order": True,
+            }
+            parameters["v4_negative_prompt"] = {
+                "caption": {
+                    "base_caption": uc,
+                    "char_captions": [],
+                },
+                "use_coords": False,
+                "use_order": False,
+                "legacy_uc": False,
+            }
+        else:
+            parameters["sm"] = settings.smea
+            parameters["sm_dyn"] = settings.smea_dyn
         if settings.seed != -1:
             parameters["seed"] = settings.seed
 
@@ -96,10 +116,34 @@ class NovelAIClient:
             parameters["mask"] = mask_b64
 
         return {
-            "input": self.build_prompt(prompt, settings),
+            "input": built_prompt,
             "model": model,
             "action": action,
             "parameters": parameters,
+        }
+
+
+    def debug_settings(self, settings: UserSettings) -> dict:
+        """Return the effective NovelAI model and generation parameters for diagnostics."""
+        payload = self.build_payload("debug prompt", settings)
+        parameters = payload["parameters"]
+        return {
+            "endpoint": f"{self.base_url}/ai/generate-image",
+            "model": payload["model"],
+            "action": payload["action"],
+            "width": parameters["width"],
+            "height": parameters["height"],
+            "steps": parameters["steps"],
+            "scale": parameters["scale"],
+            "sampler": parameters["sampler"],
+            "noise_schedule": parameters["noise_schedule"],
+            "cfg_rescale": parameters["cfg_rescale"],
+            "n_samples": parameters["n_samples"],
+            "ucPreset": parameters["ucPreset"],
+            "qualityToggle": parameters["qualityToggle"],
+            "negative_prompt": parameters["negative_prompt"],
+            "v4_prompt": "v4_prompt" in parameters,
+            "v4_negative_prompt": "v4_negative_prompt" in parameters,
         }
 
     async def generate(

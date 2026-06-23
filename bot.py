@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import html
 from io import BytesIO
 
 from aiogram import Bot, Dispatcher, F, types
@@ -80,6 +81,7 @@ async def help_cmd(message: types.Message):
         "/draw prompt — сгенерировать\n"
         "/settings — настройки\n"
         "/raw — показать настройки\n"
+        "/nai_debug — показать модель и параметры NovelAI\n"
         "/cancel — отменить ввод промта\n\n"
         "Можно не писать /gen: нажми кнопку 🎨 Генерация и отправь промт обычным сообщением.\n"
         "Для img2img: отправь картинку, потом ответь на неё командой /gen prompt."
@@ -93,6 +95,18 @@ async def settings_cmd(message: types.Message):
 async def raw_cmd(message: types.Message):
     s = get_settings(message.from_user.id)
     await message.answer(f"<pre>{s.to_dict()}</pre>", parse_mode="HTML")
+
+
+@dp.message(Command("nai_debug"))
+async def nai_debug_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    debug = nai.debug_settings(s)
+    lines = [f"{key}: {value}" for key, value in debug.items()]
+    await message.answer(
+        "🧪 <b>NovelAI debug</b>\n"
+        f"<pre>{html.escape(chr(10).join(lines))}</pre>",
+        parse_mode="HTML",
+    )
 
 
 async def notify_admins_about_prompt(message: types.Message, prompt: str) -> None:
