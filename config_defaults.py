@@ -79,6 +79,9 @@ class UserSettings:
     artraccoon_base_prompt: str = ""
     artraccoon_base_uc: str = ""
     artraccoon_character_negative: str = ""
+    artraccoon_character_prompt: str = ""
+    artraccoon_character_uc: str = ""
+    artraccoon_character_position: str = ""
     seed: int = -1
     uc_preset: str = "v4.5_full_heavy"
     negative_prompt: str = ""

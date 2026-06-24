@@ -11,6 +11,20 @@ from config_defaults import MODELS, UC_PRESETS, UserSettings
 log = logging.getLogger(__name__)
 SAFE_DEFAULT_MODEL = "nai-diffusion-4-5-full"
 
+
+def _join_prompt_parts(parts: list[str]) -> str:
+    return ", ".join(part.strip() for part in parts if part and part.strip())
+
+def _is_v4_model(model: str) -> bool:
+    return model.startswith(("nai-diffusion-4", "nai-diffusion-4-5"))
+
+def _character_caption(prompt: str, position: str = "") -> dict:
+    caption = {"char_caption": prompt.strip()}
+    pos = position.strip()
+    if pos:
+        caption["position"] = pos
+    return caption
+
 class NovelAIError(RuntimeError):
     pass
 
@@ -57,15 +71,27 @@ class NovelAIClient:
         mask_b64: Optional[str] = None,
     ) -> dict:
         model = self.default_model or MODELS.get(settings.model_name) or SAFE_DEFAULT_MODEL
+        is_v4_model = _is_v4_model(model)
+        character_prompt = settings.artraccoon_character_prompt.strip() if settings.artraccoon_mode else ""
+        character_uc = (
+            settings.artraccoon_character_uc.strip()
+            or settings.artraccoon_character_negative.strip()
+        ) if settings.artraccoon_mode else ""
+        has_character_payload = bool(settings.artraccoon_mode and is_v4_model and character_prompt)
+
         uc_parts = [UC_PRESETS.get(settings.uc_preset, "")]
         if settings.artraccoon_mode:
-            uc_parts.extend([settings.artraccoon_base_uc, settings.artraccoon_character_negative])
+            uc_parts.append(settings.artraccoon_base_uc)
+            if not has_character_payload:
+                uc_parts.append(character_uc)
         if settings.negative_prompt.strip():
             uc_parts.append(settings.negative_prompt.strip())
-        uc = ", ".join(part.strip() for part in uc_parts if part and part.strip())
+        uc = _join_prompt_parts(uc_parts)
 
-        built_prompt = self.build_prompt(prompt, settings)
-        is_v4_model = model.startswith(("nai-diffusion-4", "nai-diffusion-4-5"))
+        prompt_for_payload = prompt
+        if settings.artraccoon_mode and character_prompt and not has_character_payload:
+            prompt_for_payload = _join_prompt_parts([prompt, character_prompt])
+        built_prompt = self.build_prompt(prompt_for_payload, settings)
 
         parameters = {
             "params_version": 3,
@@ -83,10 +109,16 @@ class NovelAIClient:
             "negative_prompt": uc,
         }
         if is_v4_model:
+            char_captions = []
+            negative_char_captions = []
+            if has_character_payload:
+                char_captions.append(_character_caption(character_prompt, settings.artraccoon_character_position))
+                if character_uc:
+                    negative_char_captions.append(_character_caption(character_uc, settings.artraccoon_character_position))
             parameters["v4_prompt"] = {
                 "caption": {
                     "base_caption": built_prompt,
-                    "char_captions": [],
+                    "char_captions": char_captions,
                 },
                 "use_coords": False,
                 "use_order": True,
@@ -94,7 +126,7 @@ class NovelAIClient:
             parameters["v4_negative_prompt"] = {
                 "caption": {
                     "base_caption": uc,
-                    "char_captions": [],
+                    "char_captions": negative_char_captions,
                 },
                 "use_coords": False,
                 "use_order": False,
@@ -125,6 +157,21 @@ class NovelAIClient:
             "parameters": parameters,
         }
 
+
+    def safe_prompt_preview(self, prompt: str, settings: UserSettings) -> dict:
+        payload = self.build_payload(prompt, settings)
+        parameters = payload["parameters"]
+        char_captions = parameters.get("v4_prompt", {}).get("caption", {}).get("char_captions", [])
+        neg_char_captions = parameters.get("v4_negative_prompt", {}).get("caption", {}).get("char_captions", [])
+        return {
+            "model": payload["model"],
+            "base_prompt_length": len(parameters.get("v4_prompt", {}).get("caption", {}).get("base_caption", payload["input"])),
+            "character_prompt_length": len(settings.artraccoon_character_prompt.strip()),
+            "has_character_payload": bool(char_captions),
+            "negative_base_length": len(parameters.get("negative_prompt", "")),
+            "negative_character_length": len(settings.artraccoon_character_uc.strip() or settings.artraccoon_character_negative.strip()),
+            "negative_character_payload": bool(neg_char_captions),
+        }
 
     def debug_settings(self, settings: UserSettings) -> dict:
         """Return the effective NovelAI model and generation parameters for diagnostics."""

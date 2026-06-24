@@ -83,6 +83,10 @@ SETTING_PROMPTS = {
 def assemble_ar_prompt(s, character_prompt: str) -> str:
     return ", ".join(part.strip() for part in [s.artraccoon_base_prompt, character_prompt] if part.strip())
 
+def ar_payload_mode(s) -> str:
+    model = NAI_MODEL or MODELS.get(s.model_name, "")
+    return "Character Payload for v4/v4.5" if model.startswith(("nai-diffusion-4", "nai-diffusion-4-5")) else "fallback concat"
+
 def parse_nai_metadata(data: bytes) -> dict:
     texts = []
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -175,14 +179,15 @@ def metadata_summary(meta: dict) -> str:
     return "\n".join(lines)
 
 def art_prompt_preview_text(s) -> str:
-    character = s.pending_original_prompt or s.pending_prompt
-    final = s.pending_prompt
-    base = s.artraccoon_base_prompt or "—"
+    character = s.artraccoon_character_prompt or s.pending_original_prompt or s.pending_prompt
+    base = s.artraccoon_base_prompt or ""
     return (
         "🦝 <b>ArtRaccoon сборка. Запускаем?</b>\n\n"
-        f"<b>Base Prompt:</b>\n<code>{html.escape(base[:1200])}</code>\n\n"
-        f"<b>Character Prompt:</b>\n<code>{html.escape(character[:1200])}</code>\n\n"
-        f"<b>Final Prompt:</b>\n<code>{html.escape(final[:3000])}</code>"
+        f"<b>Base Prompt:</b> {'saved' if base else 'empty'}, length <code>{len(base)}</code>\n"
+        f"<code>{html.escape((base or '—')[:1200])}</code>\n\n"
+        f"<b>Character Prompt:</b> length <code>{len(character)}</code>\n"
+        f"<code>{html.escape((character or '—')[:1200])}</code>\n\n"
+        f"<b>Mode:</b> <code>{ar_payload_mode(s)}</code>"
     )
 
 def prompt_preview_text(prompt: str, original: str = "") -> str:
@@ -261,7 +266,7 @@ def prepare_prompt_for_user(user_id: int, text: str, force_tags: bool = False) -
     s = get_settings(user_id)
     if s.artraccoon_mode:
         character = natural_to_nai_tags(text) if force_tags else text
-        return assemble_ar_prompt(s, character), character
+        return s.artraccoon_base_prompt, character
     converted = natural_to_nai_tags(text)
     original = "" if converted == text and looks_like_english_tags(text) else text
     return converted, original
@@ -414,7 +419,7 @@ async def ar_settings_cmd(message: types.Message):
         return
     def brief(label, value):
         return f"<b>{label}</b> ({len(value)} симв.):\n<code>{html.escape(value[:500] or '—')}</code>"
-    await message.answer("🦝 <b>ArtRaccoon настройки</b>\n\n" + "\n\n".join([brief("Base Prompt", s.artraccoon_base_prompt), brief("Base UC", s.artraccoon_base_uc), brief("Character Negative", s.artraccoon_character_negative)]), parse_mode="HTML", reply_markup=artraccoon_menu())
+    await message.answer("🦝 <b>ArtRaccoon настройки</b>\n\n" + "\n\n".join([brief("Base Prompt", s.artraccoon_base_prompt), brief("Base UC", s.artraccoon_base_uc), brief("Character Prompt", s.artraccoon_character_prompt), brief("Character UC", s.artraccoon_character_uc or s.artraccoon_character_negative), brief("Character Position", s.artraccoon_character_position)]), parse_mode="HTML", reply_markup=artraccoon_menu())
 
 @dp.message(Command("ar_show"))
 async def ar_show_cmd(message: types.Message):
@@ -422,8 +427,30 @@ async def ar_show_cmd(message: types.Message):
     if message.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
         await message.answer("Команда не найдена.")
         return
-    for label, value in [("Base Prompt", s.artraccoon_base_prompt), ("Base UC", s.artraccoon_base_uc), ("Character Negative", s.artraccoon_character_negative)]:
+    for label, value in [("Base Prompt", s.artraccoon_base_prompt), ("Base UC", s.artraccoon_base_uc), ("Character Prompt", s.artraccoon_character_prompt), ("Character UC", s.artraccoon_character_uc or s.artraccoon_character_negative), ("Character Position", s.artraccoon_character_position)]:
         await message.answer(f"<b>{label}</b>\n<code>{html.escape(value or '—')}</code>", parse_mode="HTML")
+
+@dp.message(Command("ar_show_payload"))
+async def ar_show_payload_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    if message.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+        await message.answer("Команда не найдена.")
+        return
+    preview = nai.safe_prompt_preview(s.artraccoon_base_prompt, s)
+    negatives = (
+        f"base length={preview['negative_base_length']}; "
+        f"character length={preview['negative_character_length']}; "
+        f"character payload={'yes' if preview['negative_character_payload'] else 'no'}"
+    )
+    lines = [
+        "🧪 <b>ArtRaccoon payload preview</b>",
+        f"Model: <code>{html.escape(str(preview['model']))}</code>",
+        f"Base Prompt length: <code>{preview['base_prompt_length']}</code>",
+        f"Character Prompt length: <code>{preview['character_prompt_length']}</code>",
+        f"Has character payload: <code>{'yes' if preview['has_character_payload'] else 'no'}</code>",
+        f"Negative parts summary: <code>{html.escape(negatives)}</code>",
+    ]
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 @dp.message(Command("raw"))
 async def raw_cmd(message: types.Message):
@@ -570,7 +597,8 @@ async def gen_cmd(message: types.Message):
 
     s = get_settings(message.from_user.id)
     if s.artraccoon_mode:
-        prompt = assemble_ar_prompt(s, prompt)
+        patch_settings(message.from_user.id, artraccoon_character_prompt=prompt)
+        prompt = s.artraccoon_base_prompt
     await generate_image_from_prompt(message, prompt)
 
 @dp.message(Command("presets"))
@@ -623,7 +651,8 @@ async def draw_cmd(message: types.Message):
 
     s = get_settings(message.from_user.id)
     if s.artraccoon_mode:
-        prompt = assemble_ar_prompt(s, prompt)
+        patch_settings(message.from_user.id, artraccoon_character_prompt=prompt)
+        prompt = s.artraccoon_base_prompt
     await generate_image_from_prompt(message, prompt)
 
 @dp.callback_query(F.data == "menu:main")
@@ -747,7 +776,9 @@ async def cb_show_original(call: types.CallbackQuery):
 async def cb_prompt_confirm(call: types.CallbackQuery):
     s = get_settings(call.from_user.id)
     prompt = s.pending_prompt.strip()
-    if not prompt:
+    if s.artraccoon_mode:
+        prompt = s.artraccoon_base_prompt.strip()
+    if not prompt and not (s.artraccoon_mode and s.artraccoon_character_prompt.strip()):
         await call.answer("Черновик пуст", show_alert=True)
         await call.message.answer("📝 Черновик пуст. Пришли новый промт обычным сообщением.", reply_markup=main_menu())
         return
@@ -902,7 +933,10 @@ async def cb_prompt_tool(call: types.CallbackQuery):
     else:
         prompt = transform_prompt(source if tool == "translate" else s.pending_prompt, tool)
         original = source if tool == "translate" else s.pending_original_prompt
-    s = patch_settings(call.from_user.id, pending_prompt=prompt, pending_original_prompt=original)
+    updates = {"pending_prompt": prompt, "pending_original_prompt": original}
+    if s.artraccoon_mode:
+        updates["artraccoon_character_prompt"] = original
+    s = patch_settings(call.from_user.id, **updates)
     preview = art_prompt_preview_text(s) if s.artraccoon_mode else prompt_preview_text(prompt, original)
     await call.message.edit_text(preview, parse_mode="HTML", reply_markup=prompt_menu_for(s))
     await call.answer("Промт обновлён")
@@ -947,8 +981,13 @@ async def cb_meta_apply(call: types.CallbackQuery):
             updates["pending_original_prompt"] = ""
     if action in {"character", "all"} and meta.get("prompt"):
         character = str(meta["prompt"])
-        updates["pending_original_prompt"] = character
-        updates["pending_prompt"] = assemble_ar_prompt(s, character) if s.artraccoon_mode else character
+        if s.artraccoon_mode:
+            updates["artraccoon_character_prompt"] = character
+            updates["pending_original_prompt"] = character
+            updates["pending_prompt"] = s.artraccoon_base_prompt
+        else:
+            updates["pending_original_prompt"] = character
+            updates["pending_prompt"] = character
     if action in {"negative", "all"} and meta.get("negative_prompt"):
         if s.artraccoon_mode:
             updates["artraccoon_base_uc"] = str(meta["negative_prompt"])
@@ -1140,7 +1179,10 @@ async def gen_from_button(message: types.Message, state: FSMContext):
 
     await state.clear()
     converted, original = prepare_prompt_for_user(message.from_user.id, prompt)
-    patch_settings(message.from_user.id, pending_prompt=converted, pending_original_prompt=original, prompt_action="")
+    updates = {"pending_prompt": converted, "pending_original_prompt": original, "prompt_action": ""}
+    if get_settings(message.from_user.id).artraccoon_mode:
+        updates["artraccoon_character_prompt"] = original
+    patch_settings(message.from_user.id, **updates)
     await show_pending_prompt(message, message.from_user.id)
 
 
@@ -1331,11 +1373,17 @@ async def plain_text_prompt(message: types.Message):
     if s.prompt_action == "append" and s.pending_prompt.strip():
         original = f"{(s.pending_original_prompt or s.pending_prompt).strip()}, {text}"
         prompt, stored_original = prepare_prompt_for_user(message.from_user.id, original)
-        patch_settings(message.from_user.id, pending_prompt=prompt, pending_original_prompt=stored_original, prompt_action="")
+        updates = {"pending_prompt": prompt, "pending_original_prompt": stored_original, "prompt_action": ""}
+        if s.artraccoon_mode:
+            updates["artraccoon_character_prompt"] = stored_original
+        patch_settings(message.from_user.id, **updates)
         await message.answer("✏️ Добавила текст к черновику.")
     else:
         converted, original = prepare_prompt_for_user(message.from_user.id, text)
-        patch_settings(message.from_user.id, pending_prompt=converted, pending_original_prompt=original, prompt_action="")
+        updates = {"pending_prompt": converted, "pending_original_prompt": original, "prompt_action": ""}
+        if s.artraccoon_mode:
+            updates["artraccoon_character_prompt"] = original
+        patch_settings(message.from_user.id, **updates)
         if s.prompt_action == "replace":
             await message.answer("🔁 Заменила черновик новым промтом.")
 
