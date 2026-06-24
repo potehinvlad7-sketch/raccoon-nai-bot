@@ -69,3 +69,16 @@ def add_favorite(user_id: int, item: dict, limit: int = 50) -> None:
 def get_favorites(user_id: int) -> list[dict]:
     data = load_all()
     return list(data.get(str(user_id), {}).get("favorites", []))
+
+
+def set_last_metadata(user_id: int, metadata: dict) -> None:
+    data = load_all()
+    key = str(user_id)
+    user = data.setdefault(key, get_settings(user_id).to_dict())
+    user["last_metadata"] = metadata
+    save_all(data)
+
+def get_last_metadata(user_id: int) -> dict:
+    data = load_all()
+    meta = data.get(str(user_id), {}).get("last_metadata", {})
+    return meta if isinstance(meta, dict) else {}
