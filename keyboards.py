@@ -22,14 +22,14 @@ def main_menu(channel_url: str = "") -> InlineKeyboardMarkup:
         buttons.append(InlineKeyboardButton(text="📢 Канал", url=channel_url))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
 
-def pending_prompt_menu(has_image: bool = False, pro: bool = False) -> InlineKeyboardMarkup:
+def pending_prompt_menu(has_image: bool = False, pro: bool = False, compact: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(text="✅ Генерировать", callback_data="prompt:confirm"),
         InlineKeyboardButton(text="✏️ Дописать", callback_data="prompt:append"),
         InlineKeyboardButton(text="🔁 Заменить", callback_data="prompt:replace"),
         InlineKeyboardButton(text="🇬🇧 В теги", callback_data="tool:translate"),
     ]
-    if pro:
+    if pro and not compact:
         buttons.extend([
             InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
             InlineKeyboardButton(text="📐 Размер", callback_data="settings:size"),
@@ -119,10 +119,15 @@ def noise_menu() -> InlineKeyboardMarkup:
     buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings"))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
 
-def numeric_menu(field: str, values: list[str]) -> InlineKeyboardMarkup:
-    buttons = [InlineKeyboardButton(text=v, callback_data=f"set:{field}:{v}") for v in values]
-    buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings"))
-    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 3))
+def meta_import_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="📥 Взять как Base Prompt", callback_data="meta:base"),
+        InlineKeyboardButton(text="👤 Взять как Character Prompt", callback_data="meta:character"),
+        InlineKeyboardButton(text="🚫 Взять UC/негатив", callback_data="meta:negative"),
+        InlineKeyboardButton(text="⚙️ Взять настройки", callback_data="meta:settings"),
+        InlineKeyboardButton(text="📦 Взять всё", callback_data="meta:all"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
 
 def modes_menu(furry: bool, background: bool, quality: bool) -> InlineKeyboardMarkup:
     buttons = [

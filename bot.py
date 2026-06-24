@@ -2,6 +2,9 @@ import asyncio
 import logging
 import os
 import html
+import json
+import re
+import struct
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
@@ -16,15 +19,14 @@ from dotenv import load_dotenv
 
 from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES
 from keyboards import (
-    main_menu as base_main_menu, settings_menu, model_menu, size_menu, sampler_menu,
-    uc_menu, numeric_menu, modes_menu, presets_menu, pending_prompt_menu,
-    after_generation_menu, noise_menu, artraccoon_menu
+    main_menu as base_main_menu, settings_menu, modes_menu, presets_menu, pending_prompt_menu,
+    after_generation_menu, artraccoon_menu, meta_import_menu
 )
 from app.services.nai_client import NovelAIClient, NovelAIError
 from prompt_tools import natural_to_nai_tags, looks_like_english_tags
 from storage import (
     get_settings, save_settings, patch_settings, add_history, get_history,
-    add_favorite, get_favorites
+    add_favorite, get_favorites, set_last_metadata, get_last_metadata
 )
 
 load_dotenv()
@@ -53,6 +55,7 @@ class GenState(StatesGroup):
     waiting_ar_base = State()
     waiting_ar_base_uc = State()
     waiting_ar_char_neg = State()
+    waiting_setting = State()
 
 TMP_DIR = Path("data/tmp_images")
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,9 +65,114 @@ def main_menu():
 
 SAFE_RESOLUTIONS = {(512, 768), (768, 1344), (832, 1216), (1024, 1024), (1216, 832)}
 ANLAS_WARNING = "Это может тратить Anlas. Включи 💎 PRO / Анласы, если хочешь разрешить дорогие режимы."
+SETTING_PROMPTS = {
+    "size": "📐 Пришли размер, например <code>832x1216</code>.",
+    "steps": "👣 Пришли количество шагов, например <code>28</code>.",
+    "scale": "🧲 Пришли CFG / силу промта, например <code>7.5</code>.",
+    "seed": "🎲 Пришли seed числом или <code>random</code>.",
+    "negative": "🚫 Пришли negative prompt. Чтобы очистить — отправь <code>-</code>.",
+    "model": "🧠 Пришли название модели: <code>" + "</code>, <code>".join(MODELS) + "</code>.",
+    "sampler": "🎛 Пришли sampler: <code>" + "</code>, <code>".join(SAMPLERS) + "</code>.",
+    "n": "🖼 Пришли количество картинок: <code>1</code>, <code>2</code>, <code>3</code> или <code>4</code>.",
+    "uc": "🧪 Пришли UC-пресет: <code>" + "</code>, <code>".join(UC_PRESETS) + "</code>.",
+    "cfg": "♻️ Пришли CFG rescale от 0 до 1, например <code>0.4</code>.",
+    "noise": "🌊 Пришли noise schedule: <code>" + "</code>, <code>".join(NOISE_SCHEDULES) + "</code>.",
+    "img2img": "📎 Пришли силу Img2Img в формате <code>0.55/0.10</code>.",
+}
 
 def assemble_ar_prompt(s, character_prompt: str) -> str:
     return ", ".join(part.strip() for part in [s.artraccoon_base_prompt, character_prompt] if part.strip())
+
+def parse_nai_metadata(data: bytes) -> dict:
+    texts = []
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        pos = 8
+        while pos + 8 <= len(data):
+            length = struct.unpack(">I", data[pos:pos + 4])[0]
+            kind = data[pos + 4:pos + 8]
+            chunk = data[pos + 8:pos + 8 + length]
+            if kind in {b"tEXt", b"iTXt", b"zTXt"}:
+                texts.append(chunk.decode("utf-8", "ignore"))
+            pos += 12 + length
+    texts.append(data[:2_000_000].decode("utf-8", "ignore"))
+    blob = "\n".join(t for t in texts if t)
+    found = {}
+    candidates = []
+    for start, ch in enumerate(blob):
+        if ch != "{":
+            continue
+        depth = 0
+        for pos in range(start, min(len(blob), start + 200_000)):
+            if blob[pos] == "{":
+                depth += 1
+            elif blob[pos] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = blob[start:pos + 1]
+                    if re.search(r"prompt|uc|sampler|seed|steps|scale|width|height", candidate, re.I):
+                        candidates.append(candidate)
+                    break
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            found.update(obj)
+            params = obj.get("parameters")
+            if isinstance(params, dict):
+                found.update(params)
+    aliases = {
+        "prompt": ["prompt", "Description"],
+        "negative_prompt": ["negative_prompt", "negative prompt", "uc", "Undesired Content"],
+        "model": ["model", "Model"],
+        "width": ["width"],
+        "height": ["height"],
+        "steps": ["steps"],
+        "scale": ["scale", "guidance"],
+        "seed": ["seed"],
+        "sampler": ["sampler"],
+        "uc_preset": ["ucPreset", "uc_preset"],
+        "noise_schedule": ["noise_schedule", "noiseSchedule"],
+    }
+    meta = {}
+    for target, keys in aliases.items():
+        for key in keys:
+            if key in found and found[key] not in ("", None):
+                meta[target] = found[key]
+                break
+    for target, pattern in {
+        "prompt": r"(?:prompt|description)[:=]\s*([^\n\r]+)",
+        "negative_prompt": r"(?:negative prompt|uc|undesired content)[:=]\s*([^\n\r]+)",
+        "model": r"model[:=]\s*([^\n\r,]+)",
+        "sampler": r"sampler[:=]\s*([^\n\r,]+)",
+    }.items():
+        if target not in meta:
+            m = re.search(pattern, blob, re.I)
+            if m:
+                meta[target] = m.group(1).strip()
+    for target, pattern in {
+        "width": r"width[:=]\s*(\d+)",
+        "height": r"height[:=]\s*(\d+)",
+        "steps": r"steps[:=]\s*(\d+)",
+        "scale": r"(?:scale|guidance)[:=]\s*([0-9.]+)",
+        "seed": r"seed[:=]\s*(\d+)",
+    }.items():
+        if target not in meta:
+            m = re.search(pattern, blob, re.I)
+            if m:
+                meta[target] = m.group(1)
+    return meta
+
+def metadata_summary(meta: dict) -> str:
+    if not meta:
+        return "📭 NovelAI metadata не найдена. Можно попробовать отправить оригинальный PNG/WebP/JPEG как файл."
+    labels = {"prompt": "Prompt", "negative_prompt": "UC/негатив", "model": "Model", "width": "Width", "height": "Height", "steps": "Steps", "scale": "Guidance", "seed": "Seed", "sampler": "Sampler", "uc_preset": "UC preset", "noise_schedule": "Noise"}
+    lines = ["📦 <b>Нашла metadata</b>"]
+    for key, label in labels.items():
+        if key in meta:
+            lines.append(f"<b>{label}:</b> <code>{html.escape(str(meta[key])[:900])}</code>")
+    return "\n".join(lines)
 
 def art_prompt_preview_text(s) -> str:
     character = s.pending_original_prompt or s.pending_prompt
@@ -115,7 +223,7 @@ async def show_pending_prompt(message: types.Message, user_id: int) -> None:
     await message.answer(
         preview,
         parse_mode="HTML",
-        reply_markup=pending_prompt_menu(bool(s.pending_image_path), s.pro_mode or s.artraccoon_mode),
+        reply_markup=pending_prompt_menu(bool(s.pending_image_path), s.pro_mode or s.artraccoon_mode, compact=s.artraccoon_mode),
     )
 
 def settings_text(user_id: int) -> str:
@@ -147,12 +255,12 @@ def settings_markup_for(user_id: int):
     return settings_menu(s.pro_mode or s.artraccoon_mode)
 
 def prompt_menu_for(s):
-    return pending_prompt_menu(bool(s.pending_image_path), s.pro_mode or s.artraccoon_mode)
+    return pending_prompt_menu(bool(s.pending_image_path), s.pro_mode or s.artraccoon_mode, compact=s.artraccoon_mode)
 
 def prepare_prompt_for_user(user_id: int, text: str, force_tags: bool = False) -> tuple[str, str]:
     s = get_settings(user_id)
     if s.artraccoon_mode:
-        character = text if (looks_like_english_tags(text) or "," in text) and not force_tags else natural_to_nai_tags(text)
+        character = natural_to_nai_tags(text) if force_tags else text
         return assemble_ar_prompt(s, character), character
     converted = natural_to_nai_tags(text)
     original = "" if converted == text and looks_like_english_tags(text) else text
@@ -246,6 +354,24 @@ async def xxx_cmd(message: types.Message):
     s = get_settings(message.from_user.id)
     pro_ui = s.pro_mode or s.artraccoon_mode
     await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(pro_ui), parse_mode="HTML")
+
+@dp.message(Command("meta"))
+async def meta_cmd(message: types.Message):
+    target = message.reply_to_message or message
+    file_id = None
+    if target.document:
+        file_id = target.document.file_id
+    elif target.photo:
+        file_id = target.photo[-1].file_id
+    if not file_id:
+        await message.answer("📦 Ответь командой /meta на PNG/WebP/JPEG файл или картинку с metadata NovelAI.")
+        return
+    tg_file = await message.bot.get_file(file_id)
+    bio = BytesIO()
+    await message.bot.download_file(tg_file.file_path, destination=bio)
+    meta = parse_nai_metadata(bio.getvalue())
+    set_last_metadata(message.from_user.id, meta)
+    await message.answer(metadata_summary(meta), parse_mode="HTML", reply_markup=meta_import_menu() if meta else main_menu())
 
 @dp.message(Command("generation_settings"))
 async def generation_settings_cmd(message: types.Message):
@@ -651,69 +777,21 @@ async def cb_prompt_cancel(call: types.CallbackQuery):
     await call.message.answer("❌ Черновик очищен. Когда будешь готов — пришли новый промт обычным сообщением.", reply_markup=main_menu())
     await call.answer("Отменено")
 
-@dp.callback_query(F.data == "settings:model")
-async def cb_model(call: types.CallbackQuery):
-    await call.message.edit_text("Выбери модель:", reply_markup=model_menu())
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:size")
-async def cb_size(call: types.CallbackQuery):
-    await call.message.edit_text("Выбери размер:", reply_markup=size_menu())
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:sampler")
-async def cb_sampler(call: types.CallbackQuery):
-    await call.message.edit_text("Выбери sampler:", reply_markup=sampler_menu())
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:uc")
-async def cb_uc(call: types.CallbackQuery):
-    await call.message.edit_text("Выбери UC preset:", reply_markup=uc_menu())
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:n")
-async def cb_n(call: types.CallbackQuery):
-    await call.message.edit_text("Сколько картинок за раз?", reply_markup=numeric_menu("n", ["1", "2", "3", "4"]))
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:steps")
-async def cb_steps(call: types.CallbackQuery):
-    await call.message.edit_text("Steps:", reply_markup=numeric_menu("steps", ["10", "18", "23", "28", "32", "40"]))
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:scale")
-async def cb_scale(call: types.CallbackQuery):
-    await call.message.edit_text("Guidance / scale:", reply_markup=numeric_menu("scale", ["2.5", "3", "4", "5", "6", "7"]))
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:seed")
-async def cb_seed(call: types.CallbackQuery):
-    await call.message.edit_text("Seed:", reply_markup=numeric_menu("seed", ["-1", "1", "42", "12345", "777", "999999"]))
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:negative")
-async def cb_negative(call: types.CallbackQuery):
-    await call.message.edit_text(
-        "🚫 Чтобы задать negative prompt, напиши:\n"
-        "<code>/negative bad hands, extra fingers</code>",
-        reply_markup=settings_markup_for(call.from_user.id),
-        parse_mode="HTML",
-    )
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:cfg")
-async def cb_cfg(call: types.CallbackQuery):
-    await call.message.edit_text("CFG rescale:", reply_markup=numeric_menu("cfg", ["0", "0.2", "0.4", "0.6", "0.8", "1.0"]))
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:noise")
-async def cb_noise(call: types.CallbackQuery):
-    await call.message.edit_text("Noise schedule:", reply_markup=noise_menu())
-    await call.answer()
-
-@dp.callback_query(F.data == "settings:img2img")
-async def cb_img2img_settings(call: types.CallbackQuery):
-    await call.message.edit_text("Img2Img strength / noise:", reply_markup=numeric_menu("img2img", ["0.35/0.05", "0.50/0.10", "0.65/0.15", "0.75/0.20"]))
+@dp.callback_query(F.data.startswith("settings:"))
+async def cb_setting_text_input(call: types.CallbackQuery, state: FSMContext):
+    field = call.data.split(":", 1)[1]
+    if field == "modes":
+        s = get_settings(call.from_user.id)
+        await call.message.edit_text("🦝 Режимы:", reply_markup=modes_menu(s.furry_mode, s.background_mode, s.add_quality_tags))
+        await call.answer()
+        return
+    prompt = SETTING_PROMPTS.get(field)
+    if not prompt:
+        await call.answer("Неизвестная настройка", show_alert=True)
+        return
+    await state.set_state(GenState.waiting_setting)
+    await state.update_data(setting_field=field)
+    await call.message.answer(prompt + "\n\n/cancel — отменить ввод.", parse_mode="HTML")
     await call.answer()
 
 @dp.callback_query(F.data == "settings:modes")
@@ -829,6 +907,64 @@ async def cb_prompt_tool(call: types.CallbackQuery):
     await call.message.edit_text(preview, parse_mode="HTML", reply_markup=prompt_menu_for(s))
     await call.answer("Промт обновлён")
 
+def metadata_settings_updates(meta: dict) -> dict:
+    updates = {}
+    for key, target, cast in [
+        ("width", "width", int), ("height", "height", int), ("steps", "steps", int),
+        ("scale", "scale", float), ("seed", "seed", int),
+    ]:
+        if key in meta:
+            try:
+                updates[target] = cast(meta[key])
+            except (ValueError, TypeError):
+                pass
+    if str(meta.get("sampler", "")) in SAMPLERS:
+        updates["sampler"] = str(meta["sampler"])
+    if str(meta.get("uc_preset", "")) in UC_PRESETS:
+        updates["uc_preset"] = str(meta["uc_preset"])
+    if str(meta.get("noise_schedule", "")) in NOISE_SCHEDULES:
+        updates["noise_schedule"] = str(meta["noise_schedule"])
+    for name, value in MODELS.items():
+        if meta.get("model") in (name, value):
+            updates["model_name"] = name
+            break
+    return updates
+
+@dp.callback_query(F.data.startswith("meta:"))
+async def cb_meta_apply(call: types.CallbackQuery):
+    action = call.data.split(":", 1)[1]
+    meta = get_last_metadata(call.from_user.id)
+    if not meta:
+        await call.answer("Metadata не найдена", show_alert=True)
+        return
+    s = get_settings(call.from_user.id)
+    updates = {}
+    if action in {"base", "all"} and meta.get("prompt"):
+        if s.artraccoon_mode:
+            updates["artraccoon_base_prompt"] = str(meta["prompt"])
+        else:
+            updates["pending_prompt"] = str(meta["prompt"])
+            updates["pending_original_prompt"] = ""
+    if action in {"character", "all"} and meta.get("prompt"):
+        character = str(meta["prompt"])
+        updates["pending_original_prompt"] = character
+        updates["pending_prompt"] = assemble_ar_prompt(s, character) if s.artraccoon_mode else character
+    if action in {"negative", "all"} and meta.get("negative_prompt"):
+        if s.artraccoon_mode:
+            updates["artraccoon_base_uc"] = str(meta["negative_prompt"])
+        else:
+            updates["negative_prompt"] = str(meta["negative_prompt"])
+    if action in {"settings", "all"}:
+        updates.update(metadata_settings_updates(meta))
+    if not updates:
+        await call.answer("В metadata нет подходящих полей для этого действия", show_alert=True)
+        return
+    patch_settings(call.from_user.id, **updates)
+    await call.message.answer("✅ Metadata применена.", reply_markup=settings_markup_for(call.from_user.id))
+    if "pending_prompt" in updates:
+        await show_pending_prompt(call.message, call.from_user.id)
+    await call.answer("Готово")
+
 @dp.message(F.photo)
 async def photo_message(message: types.Message):
     if message.from_user is None:
@@ -909,6 +1045,90 @@ async def ar_char_neg_input(message: types.Message, state: FSMContext):
     await state.clear()
     patch_settings(message.from_user.id, artraccoon_character_negative=(message.text or "").strip())
     await message.answer("👤 Негатив персонажа сохранён.", reply_markup=artraccoon_menu())
+
+def parse_setting_value(user_id: int, field: str, raw: str) -> tuple[dict | None, str]:
+    text = raw.strip()
+    s = get_settings(user_id)
+    advanced = s.pro_mode or s.artraccoon_mode
+    try:
+        if field == "size":
+            m = re.fullmatch(r"\s*(\d{3,4})\s*[xх*]\s*(\d{3,4})\s*", text, re.I)
+            if not m:
+                return None, "Размер нужен в формате 832x1216."
+            w, h = int(m.group(1)), int(m.group(2))
+            if not advanced and (w, h) not in SAFE_RESOLUTIONS:
+                return None, "В обычном режиме доступны только безопасные размеры: 512x768, 768x1344, 832x1216, 1024x1024, 1216x832."
+            if not (256 <= w <= 2048 and 256 <= h <= 2048):
+                return None, "Размер должен быть от 256 до 2048 по каждой стороне."
+            return {"width": w, "height": h}, "📐 Размер обновлён."
+        if field == "steps":
+            val = int(text)
+            if val < 1 or val > (60 if advanced else 28):
+                return None, "В обычном режиме максимум 28 шагов." if not advanced else "Steps должны быть от 1 до 60."
+            return {"steps": val}, "👣 Steps обновлены."
+        if field == "scale":
+            val = float(text.replace(",", "."))
+            if not 0 <= val <= 20:
+                return None, "CFG должен быть от 0 до 20."
+            return {"scale": val}, "🧲 CFG обновлён."
+        if field == "seed":
+            if text.lower() == "random":
+                return {"seed": -1}, "🎲 Seed переключён в random."
+            val = int(text)
+            if val < 0 or val > 4294967295:
+                return None, "Seed должен быть от 0 до 4294967295 или random."
+            return {"seed": val}, "🎲 Seed обновлён."
+        if field == "negative":
+            return {"negative_prompt": "" if text == "-" else text}, "🚫 Негатив обновлён."
+        if field == "model":
+            if text not in MODELS:
+                return None, "Такой модели нет. Скопируй одно из названий из подсказки."
+            return {"model_name": text}, "🧠 Модель обновлена."
+        if field == "sampler":
+            if text not in SAMPLERS:
+                return None, "Такого sampler нет. Скопируй одно из значений из подсказки."
+            return {"sampler": text}, "🎛 Sampler обновлён."
+        if field == "n":
+            val = int(text)
+            if val not in (1, 2, 3, 4):
+                return None, "Количество картинок: 1, 2, 3 или 4."
+            if not advanced and val != 1:
+                return None, "В обычном режиме количество картинок всегда 1."
+            return {"n_samples": val}, "🖼 Количество обновлено."
+        if field == "uc":
+            if text not in UC_PRESETS:
+                return None, "Такого UC-пресета нет. Скопируй одно из значений из подсказки."
+            return {"uc_preset": text}, "🧪 UC-пресет обновлён."
+        if field == "cfg":
+            val = float(text.replace(",", "."))
+            if not 0 <= val <= 1:
+                return None, "CFG rescale должен быть от 0 до 1."
+            return {"cfg_rescale": val}, "♻️ CFG rescale обновлён."
+        if field == "noise":
+            if text not in NOISE_SCHEDULES:
+                return None, "Такого noise schedule нет. Скопируй одно из значений из подсказки."
+            return {"noise_schedule": text}, "🌊 Noise schedule обновлён."
+        if field == "img2img":
+            strength, noise = [float(x.replace(",", ".")) for x in text.split("/", 1)]
+            if not (0 <= strength <= 1 and 0 <= noise <= 1):
+                return None, "Img2Img strength/noise должны быть от 0 до 1."
+            return {"img2img_strength": strength, "img2img_noise": noise}, "📎 Img2Img обновлён."
+    except (ValueError, TypeError):
+        return None, "Не получилось прочитать значение. Проверь формат и попробуй ещё раз."
+    return None, "Неизвестная настройка."
+
+@dp.message(GenState.waiting_setting)
+async def setting_text_input(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    field = data.get("setting_field", "")
+    updates, response = parse_setting_value(message.from_user.id, field, message.text or "")
+    if updates is None:
+        await message.answer("😅 " + response + "\n\n" + SETTING_PROMPTS.get(field, ""), parse_mode="HTML")
+        return
+    await state.clear()
+    patch_settings(message.from_user.id, **updates)
+    await message.answer(response, reply_markup=settings_markup_for(message.from_user.id))
+    await message.answer(settings_text(message.from_user.id), reply_markup=settings_markup_for(message.from_user.id), parse_mode="HTML")
 
 @dp.message(GenState.waiting_prompt)
 async def gen_from_button(message: types.Message, state: FSMContext):
