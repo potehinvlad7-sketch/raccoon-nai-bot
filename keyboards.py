@@ -48,6 +48,8 @@ def pending_prompt_menu(has_image: bool = False, pro: bool = False, compact: boo
             InlineKeyboardButton(text="👧 Добавить Аэлиту", callback_data="tool:aelita"),
             InlineKeyboardButton(text="📎 Img2Img" + (" ✅" if has_image else ""), callback_data="menu:img2img"),
         ])
+    if not pro:
+        buttons.append(InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"))
     buttons.append(InlineKeyboardButton(text="❌ Отмена", callback_data="prompt:cancel"))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
 
@@ -71,6 +73,8 @@ def presets_menu() -> InlineKeyboardMarkup:
 def settings_menu(pro: bool = True) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(text="📐 Размер", callback_data="settings:size"),
+        InlineKeyboardButton(text="👣 Шаги", callback_data="settings:steps"),
+        InlineKeyboardButton(text="🧲 CFG / сила промта", callback_data="settings:scale"),
         InlineKeyboardButton(text="🎲 Seed", callback_data="settings:seed"),
         InlineKeyboardButton(text="🚫 Негатив", callback_data="settings:negative"),
         InlineKeyboardButton(text="🧠 Модель", callback_data="settings:model"),
@@ -78,8 +82,6 @@ def settings_menu(pro: bool = True) -> InlineKeyboardMarkup:
     if pro:
         buttons.extend([
             InlineKeyboardButton(text="🖼 Кол-во картинок", callback_data="settings:n"),
-            InlineKeyboardButton(text="👣 Шаги", callback_data="settings:steps"),
-            InlineKeyboardButton(text="🧲 CFG / сила промта", callback_data="settings:scale"),
             InlineKeyboardButton(text="🎛 Сэмплер", callback_data="settings:sampler"),
             InlineKeyboardButton(text="🧪 UC-пресет", callback_data="settings:uc"),
             InlineKeyboardButton(text="♻️ CFG rescale", callback_data="settings:cfg"),
@@ -89,9 +91,16 @@ def settings_menu(pro: bool = True) -> InlineKeyboardMarkup:
         ])
     buttons.extend([
         InlineKeyboardButton(text="💎 PRO / Анласы", callback_data="toggle:pro"),
+        InlineKeyboardButton(text="♻️ Сброс настроек", callback_data="reset:ask"),
         InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
+
+def confirm_reset_menu(kind: str = "settings") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, сбросить", callback_data=f"reset:confirm:{kind}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="reset:cancel")],
+    ])
 
 def model_menu() -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(text=name, callback_data=f"set:model:{name}") for name in MODELS]

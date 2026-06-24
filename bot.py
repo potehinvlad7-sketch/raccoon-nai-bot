@@ -17,10 +17,10 @@ from aiogram.types import BufferedInputFile
 from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 
-from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES
+from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES, UserSettings
 from keyboards import (
     main_menu as base_main_menu, settings_menu, modes_menu, presets_menu, pending_prompt_menu,
-    after_generation_menu, artraccoon_menu, meta_import_menu
+    after_generation_menu, artraccoon_menu, meta_import_menu, confirm_reset_menu
 )
 from app.services.nai_client import NovelAIClient, NovelAIError
 from prompt_tools import natural_to_nai_tags, looks_like_english_tags
@@ -192,7 +192,20 @@ def art_prompt_preview_text(s) -> str:
         f"<b>Mode:</b> <code>{ar_payload_mode(s)}</code>"
     )
 
-def prompt_preview_text(prompt: str, original: str = "") -> str:
+def generation_settings_summary(s) -> str:
+    negative = (s.negative_prompt or "").strip()
+    negative = "empty" if not negative else html.escape(negative[:120])
+    seed = "random" if s.seed == -1 else str(s.seed)
+    return (
+        f"📐 Размер: <code>{s.width}x{s.height}</code>\n"
+        f"👣 Шаги: <code>{s.steps}</code>\n"
+        f"🧲 CFG: <code>{s.scale}</code>\n"
+        f"🎲 Seed: <code>{seed}</code>\n"
+        f"🚫 Негатив: <code>{negative}</code>\n"
+        f"🧠 Модель: <code>{html.escape(s.model_name)}</code>"
+    )
+
+def prompt_preview_text(prompt: str, original: str = "", settings=None) -> str:
     if original and original.strip() and original.strip() != prompt.strip():
         return (
             "📝 <b>Промт готов. Запускаем?</b>\n\n"
@@ -200,15 +213,17 @@ def prompt_preview_text(prompt: str, original: str = "") -> str:
             f"<code>{html.escape(original[:1400])}</code>\n\n"
             "<b>Теговый промт:</b>\n"
             f"<code>{html.escape(prompt[:3000])}</code>"
+            + ("\n\n" + generation_settings_summary(settings) if settings else "")
         )
     return (
         "📝 <b>Промт готов. Запускаем?</b>\n\n"
         f"<code>{html.escape(prompt[:3000])}</code>"
+        + ("\n\n" + generation_settings_summary(settings) if settings else "")
     )
 
 def apply_anlas_safe_defaults(user_id: int):
     s = get_settings(user_id)
-    if s.pro_mode:
+    if s.pro_mode and user_id in ADMIN_IDS:
         return s
     updates = {}
     if s.n_samples != 1:
@@ -221,16 +236,46 @@ def apply_anlas_safe_defaults(user_id: int):
         s = patch_settings(user_id, **updates)
     return s
 
+def safe_generation_defaults() -> dict:
+    defaults = UserSettings()
+    return {
+        "width": defaults.width,
+        "height": defaults.height,
+        "steps": defaults.steps,
+        "scale": defaults.scale,
+        "seed": defaults.seed,
+        "negative_prompt": defaults.negative_prompt,
+        "model_name": defaults.model_name,
+        "sampler": defaults.sampler,
+        "n_samples": 1,
+        "uc_preset": defaults.uc_preset,
+        "cfg_rescale": defaults.cfg_rescale,
+        "noise_schedule": defaults.noise_schedule,
+        "img2img_strength": defaults.img2img_strength,
+        "img2img_noise": defaults.img2img_noise,
+        "pro_mode": False,
+    }
+
+def artraccoon_prompt_defaults() -> dict:
+    return {
+        "artraccoon_base_prompt": "",
+        "artraccoon_base_uc": "",
+        "artraccoon_character_prompt": "",
+        "artraccoon_character_uc": "",
+        "artraccoon_character_negative": "",
+        "artraccoon_character_position": "",
+    }
+
 async def show_pending_prompt(message: types.Message, user_id: int) -> None:
     s = get_settings(user_id)
     if not s.pending_prompt:
         await message.answer("📝 Черновик пуст. Пришли новый промт обычным сообщением.", reply_markup=main_menu())
         return
-    preview = art_prompt_preview_text(s) if s.artraccoon_mode else prompt_preview_text(s.pending_prompt, s.pending_original_prompt)
+    preview = art_prompt_preview_text(s) if s.artraccoon_mode else prompt_preview_text(s.pending_prompt, s.pending_original_prompt, s)
     await message.answer(
         preview,
         parse_mode="HTML",
-        reply_markup=pending_prompt_menu(bool(s.pending_image_path), s.pro_mode or s.artraccoon_mode, compact=s.artraccoon_mode),
+        reply_markup=pending_prompt_menu(bool(s.pending_image_path), (s.pro_mode and user_id in ADMIN_IDS) or s.artraccoon_mode, compact=s.artraccoon_mode),
     )
 
 def settings_text(user_id: int) -> str:
@@ -259,10 +304,10 @@ def settings_text(user_id: int) -> str:
 
 def settings_markup_for(user_id: int):
     s = get_settings(user_id)
-    return settings_menu(s.pro_mode or s.artraccoon_mode)
+    return settings_menu((s.pro_mode and user_id in ADMIN_IDS) or s.artraccoon_mode)
 
-def prompt_menu_for(s):
-    return pending_prompt_menu(bool(s.pending_image_path), s.pro_mode or s.artraccoon_mode, compact=s.artraccoon_mode)
+def prompt_menu_for(s, user_id: int):
+    return pending_prompt_menu(bool(s.pending_image_path), (s.pro_mode and user_id in ADMIN_IDS) or s.artraccoon_mode, compact=s.artraccoon_mode)
 
 def prepare_prompt_for_user(user_id: int, text: str, force_tags: bool = False) -> tuple[str, str]:
     s = get_settings(user_id)
@@ -359,7 +404,7 @@ async def help_cmd(message: types.Message):
 @dp.message(Command("xxx"))
 async def xxx_cmd(message: types.Message):
     s = get_settings(message.from_user.id)
-    pro_ui = s.pro_mode or s.artraccoon_mode
+    pro_ui = (s.pro_mode and message.from_user.id in ADMIN_IDS) or s.artraccoon_mode
     await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(pro_ui), parse_mode="HTML")
 
 @dp.message(Command("meta"))
@@ -380,22 +425,52 @@ async def meta_cmd(message: types.Message):
     set_last_metadata(message.from_user.id, meta)
     await message.answer(metadata_summary(meta), parse_mode="HTML", reply_markup=meta_import_menu() if meta else main_menu())
 
+@dp.message(Command("reset_settings"))
+async def reset_settings_cmd(message: types.Message):
+    await message.answer(
+        "♻️ Сбросить настройки генерации к безопасным значениям?",
+        reply_markup=confirm_reset_menu("settings"),
+    )
+
+@dp.message(Command("ar_reset"))
+async def ar_reset_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    if message.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+        await message.answer("Команда не найдена.")
+        return
+    await message.answer(
+        "🦝 Сбросить сохранённые ArtRaccoon-промты? Режим останется включённым.",
+        reply_markup=confirm_reset_menu("ar"),
+    )
+
 @dp.message(Command("generation_settings"))
 async def generation_settings_cmd(message: types.Message):
     s = get_settings(message.from_user.id)
-    await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(s.pro_mode or s.artraccoon_mode), parse_mode="HTML")
+    await message.answer(settings_text(message.from_user.id), reply_markup=settings_markup_for(message.from_user.id), parse_mode="HTML")
 
 @dp.message(Command("settings"))
 async def settings_cmd(message: types.Message):
     s = get_settings(message.from_user.id)
-    await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(s.pro_mode or s.artraccoon_mode), parse_mode="HTML")
+    await message.answer(settings_text(message.from_user.id), reply_markup=settings_markup_for(message.from_user.id), parse_mode="HTML")
 
 @dp.message(Command("pro"))
 async def pro_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        patch_settings(message.from_user.id, pro_mode=False)
+        await message.answer("💎 PRO-режим пока доступен только администратору.")
+        return
     s = get_settings(message.from_user.id)
     patch_settings(message.from_user.id, pro_mode=not s.pro_mode)
     s = get_settings(message.from_user.id)
     await message.answer("💎 PRO режим включён. Расширенные функции могут тратить Anlas." if s.pro_mode else "✅ Обычный режим включён. Дорогие функции скрыты.", reply_markup=settings_menu(s.pro_mode or s.artraccoon_mode))
+
+@dp.message(Command("ArtRaccoonoff"))
+async def artraccoon_off_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    patch_settings(message.from_user.id, artraccoon_mode=False)
+    await message.answer("🦝 ArtRaccoon режим выключен. Сохранённые настройки не удалены.", reply_markup=main_menu())
 
 @dp.message(Command("ArtRaccoonon"))
 async def artraccoon_on_cmd(message: types.Message):
@@ -696,6 +771,35 @@ async def cb_settings(call: types.CallbackQuery):
     await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer()
 
+@dp.callback_query(F.data == "reset:ask")
+async def cb_reset_ask(call: types.CallbackQuery):
+    await call.message.edit_text(
+        "♻️ Сбросить настройки генерации к безопасным значениям?",
+        reply_markup=confirm_reset_menu("settings"),
+    )
+    await call.answer()
+
+@dp.callback_query(F.data == "reset:cancel")
+async def cb_reset_cancel(call: types.CallbackQuery):
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
+    await call.answer("Отменено")
+
+@dp.callback_query(F.data.startswith("reset:confirm:"))
+async def cb_reset_confirm(call: types.CallbackQuery):
+    kind = call.data.rsplit(":", 1)[-1]
+    if kind == "ar":
+        s = get_settings(call.from_user.id)
+        if call.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+            await call.answer("Команда не найдена.", show_alert=True)
+            return
+        patch_settings(call.from_user.id, **artraccoon_prompt_defaults())
+        await call.message.edit_text("🦝 ArtRaccoon-промты очищены. Режим остался включённым.", reply_markup=artraccoon_menu())
+        await call.answer("Сброшено")
+        return
+    patch_settings(call.from_user.id, **safe_generation_defaults())
+    await call.message.edit_text("♻️ Настройки генерации сброшены к безопасным значениям.", reply_markup=settings_markup_for(call.from_user.id))
+    await call.answer("Сброшено")
+
 @dp.callback_query(F.data == "menu:gen")
 async def cb_gen(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(GenState.waiting_prompt)
@@ -757,7 +861,7 @@ async def cb_preset_show(call: types.CallbackQuery):
     await call.message.edit_text(
         f"✍️ <b>{preset['title']}</b> — сохранила как черновик.\n\n"
         + prompt_preview_text(prompt),
-        reply_markup=prompt_menu_for(current),
+        reply_markup=prompt_menu_for(current, call.from_user.id),
         parse_mode="HTML",
     )
     await call.answer("Промт готов")
@@ -792,9 +896,9 @@ async def cb_show_original(call: types.CallbackQuery):
         await call.answer("Черновик пуст", show_alert=True)
         return
     await call.message.edit_text(
-        prompt_preview_text(s.pending_prompt, s.pending_original_prompt),
+        prompt_preview_text(s.pending_prompt, s.pending_original_prompt, s),
         parse_mode="HTML",
-        reply_markup=prompt_menu_for(s),
+        reply_markup=prompt_menu_for(s, call.from_user.id),
     )
     await call.answer("Показываю исходник")
 
@@ -963,8 +1067,8 @@ async def cb_prompt_tool(call: types.CallbackQuery):
     if s.artraccoon_mode:
         updates["artraccoon_character_prompt"] = original
     s = patch_settings(call.from_user.id, **updates)
-    preview = art_prompt_preview_text(s) if s.artraccoon_mode else prompt_preview_text(prompt, original)
-    await call.message.edit_text(preview, parse_mode="HTML", reply_markup=prompt_menu_for(s))
+    preview = art_prompt_preview_text(s) if s.artraccoon_mode else prompt_preview_text(prompt, original, s)
+    await call.message.edit_text(preview, parse_mode="HTML", reply_markup=prompt_menu_for(s, call.from_user.id))
     await call.answer("Промт обновлён")
 
 def metadata_settings_updates(meta: dict) -> dict:
@@ -1090,7 +1194,7 @@ async def cb_ar_exit(call: types.CallbackQuery):
         await call.answer("Команда не найдена.", show_alert=True)
         return
     patch_settings(call.from_user.id, artraccoon_mode=False, pending_prompt="", pending_original_prompt="", prompt_action="")
-    await call.message.edit_text("✅ ArtRaccoon режим выключен.", reply_markup=main_menu())
+    await call.message.edit_text("🦝 ArtRaccoon режим выключен. Сохранённые настройки не удалены.", reply_markup=main_menu())
     await call.answer()
 
 @dp.message(GenState.waiting_ar_base)
@@ -1114,7 +1218,7 @@ async def ar_char_neg_input(message: types.Message, state: FSMContext):
 def parse_setting_value(user_id: int, field: str, raw: str) -> tuple[dict | None, str]:
     text = raw.strip()
     s = get_settings(user_id)
-    advanced = s.pro_mode or s.artraccoon_mode
+    advanced = (s.pro_mode and user_id in ADMIN_IDS) or s.artraccoon_mode
     try:
         if field == "size":
             m = re.fullmatch(r"\s*(\d{3,4})\s*[xх*]\s*(\d{3,4})\s*", text, re.I)
@@ -1237,14 +1341,14 @@ async def set_size(call: types.CallbackQuery):
         save_settings(call.from_user.id, s)
     elif name in RESOLUTIONS:
         w, h = RESOLUTIONS[name]
-        if not s.pro_mode and not s.artraccoon_mode and (w, h) not in SAFE_RESOLUTIONS:
+        if not (s.pro_mode and call.from_user.id in ADMIN_IDS) and not s.artraccoon_mode and (w, h) not in SAFE_RESOLUTIONS:
             w, h = 832, 1216
             patch_settings(call.from_user.id, width=w, height=h)
             await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
             await call.answer("В обычном режиме доступны только безопасные размеры. Поставила 832x1216 🙂", show_alert=True)
             return
         patch_settings(call.from_user.id, width=w, height=h)
-    if not s.pro_mode and not s.artraccoon_mode and (get_settings(call.from_user.id).width, get_settings(call.from_user.id).height) not in SAFE_RESOLUTIONS:
+    if not (s.pro_mode and call.from_user.id in ADMIN_IDS) and not s.artraccoon_mode and (get_settings(call.from_user.id).width, get_settings(call.from_user.id).height) not in SAFE_RESOLUTIONS:
         patch_settings(call.from_user.id, width=832, height=1216)
         await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
         await call.answer("В обычном режиме доступны только безопасные размеры. Поставила 832x1216 🙂", show_alert=True)
@@ -1275,7 +1379,7 @@ async def set_uc(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("set:n:"))
 async def set_n(call: types.CallbackQuery):
     val = int(call.data.split(":", 2)[2])
-    if val > 1 and not get_settings(call.from_user.id).pro_mode:
+    if val > 1 and not (get_settings(call.from_user.id).pro_mode and call.from_user.id in ADMIN_IDS):
         patch_settings(call.from_user.id, n_samples=1)
         await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
         await call.answer(ANLAS_WARNING, show_alert=True)
@@ -1288,7 +1392,7 @@ async def set_n(call: types.CallbackQuery):
 async def set_steps(call: types.CallbackQuery):
     val = int(call.data.split(":", 2)[2])
     s = get_settings(call.from_user.id)
-    if val > 28 and not s.pro_mode and not s.artraccoon_mode:
+    if val > 28 and not (s.pro_mode and call.from_user.id in ADMIN_IDS) and not s.artraccoon_mode:
         val = 28
         patch_settings(call.from_user.id, steps=val)
         await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
@@ -1349,6 +1453,11 @@ async def set_img2img(call: types.CallbackQuery):
 
 @dp.callback_query(F.data == "toggle:pro")
 async def toggle_pro(call: types.CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        patch_settings(call.from_user.id, pro_mode=False)
+        await call.answer("💎 PRO-режим пока доступен только администратору.", show_alert=True)
+        await call.message.answer("💎 PRO-режим пока доступен только администратору.")
+        return
     s = get_settings(call.from_user.id)
     new_value = not s.pro_mode
     updates = {"pro_mode": new_value}
