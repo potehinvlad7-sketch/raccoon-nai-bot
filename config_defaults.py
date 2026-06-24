@@ -27,6 +27,33 @@ RESOLUTIONS = {
     "Small 512x768": (512, 768),
 }
 
+QUICK_PRESETS = {
+    "aelita": {
+        "title": "Аэлита",
+        "prompt": "Aelita, elegant retro-futuristic princess from Mars, silver crown, red desert palace, art nouveau, cinematic light",
+    },
+    "anime_portrait": {
+        "title": "Anime portrait",
+        "prompt": "anime portrait, expressive eyes, soft rim light, detailed hair, clean lineart, beautiful face, simple background",
+    },
+    "fantasy_tarot": {
+        "title": "Fantasy tarot",
+        "prompt": "fantasy tarot card, ornate golden frame, mystical character, symbolic details, glowing magic, highly detailed illustration",
+    },
+    "watercolor_raccoon": {
+        "title": "Watercolor raccoon",
+        "prompt": "cute raccoon, watercolor illustration, soft paper texture, gentle colors, cozy forest, whimsical mood",
+    },
+    "manga_action": {
+        "title": "Manga action",
+        "prompt": "manga action scene, dynamic pose, speed lines, dramatic perspective, impact frame, black and white ink",
+    },
+    "arcane_style": {
+        "title": "Arcane style",
+        "prompt": "stylized fantasy character portrait, painterly animation look, dramatic lighting, ornate details, rich colors",
+    },
+}
+
 UC_PRESETS = {
     "none": "",
     "v4.5_full_heavy": "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page",
@@ -51,6 +78,7 @@ class UserSettings:
     furry_mode: bool = False
     background_mode: bool = False
     add_quality_tags: bool = True
+    last_prompt: str = ""
 
     # Расширенные параметры. Можно менять через код/будущее меню.
     noise_schedule: str = "karras"

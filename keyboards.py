@@ -1,17 +1,27 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config_defaults import MODELS, RESOLUTIONS, SAMPLERS, UC_PRESETS
+from config_defaults import MODELS, RESOLUTIONS, SAMPLERS, UC_PRESETS, QUICK_PRESETS
 
 def rows(buttons, width=2):
     return [buttons[i:i+width] for i in range(0, len(buttons), width)]
 
 def main_menu() -> InlineKeyboardMarkup:
     buttons = [
-        InlineKeyboardButton(text="🎨 Генерация", callback_data="menu:gen"),
+        InlineKeyboardButton(text="🎨 Новый промт", callback_data="menu:gen"),
+        InlineKeyboardButton(text="⚡ Быстрые пресеты", callback_data="menu:presets"),
+        InlineKeyboardButton(text="🔁 Повторить", callback_data="quick:retry"),
+        InlineKeyboardButton(text="📝 Последний промт", callback_data="quick:last_prompt"),
         InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
-        InlineKeyboardButton(text="🧪 Пресеты", callback_data="menu:presets"),
         InlineKeyboardButton(text="📎 Img2Img", callback_data="menu:img2img"),
         InlineKeyboardButton(text="❔ Помощь", callback_data="menu:help"),
     ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
+
+def presets_menu() -> InlineKeyboardMarkup:
+    buttons = []
+    for key, preset in QUICK_PRESETS.items():
+        buttons.append(InlineKeyboardButton(text=f"▶️ {preset['title']}", callback_data=f"preset:gen:{key}"))
+        buttons.append(InlineKeyboardButton(text=f"✍️ {preset['title']}", callback_data=f"preset:show:{key}"))
+    buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main"))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
 
 def settings_menu() -> InlineKeyboardMarkup:
