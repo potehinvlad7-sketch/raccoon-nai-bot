@@ -2,7 +2,7 @@ import base64
 import io
 import logging
 import zipfile
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import httpx
 
@@ -69,6 +69,7 @@ class NovelAIClient:
         settings: UserSettings,
         image_b64: Optional[str] = None,
         mask_b64: Optional[str] = None,
+        force_character_concat: bool = False,
     ) -> dict:
         model = self.default_model or MODELS.get(settings.model_name) or SAFE_DEFAULT_MODEL
         is_v4_model = _is_v4_model(model)
@@ -77,7 +78,13 @@ class NovelAIClient:
             settings.artraccoon_character_uc.strip()
             or settings.artraccoon_character_negative.strip()
         ) if settings.artraccoon_mode else ""
-        has_character_payload = bool(settings.artraccoon_mode and is_v4_model and character_prompt)
+        has_character_payload = bool(
+            settings.artraccoon_mode
+            and is_v4_model
+            and character_prompt
+            and not settings.artraccoon_force_concat
+            and not force_character_concat
+        )
 
         uc_parts = [UC_PRESETS.get(settings.uc_preset, "")]
         if settings.artraccoon_mode:
@@ -202,6 +209,7 @@ class NovelAIClient:
         settings: UserSettings,
         image_bytes: Optional[bytes] = None,
         mask_bytes: Optional[bytes] = None,
+        on_character_payload_fallback: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> list[bytes]:
         if not self.token or self.token.startswith("PASTE_"):
             raise NovelAIError("NOVELAI_TOKEN не настроен. Добавьте токен в переменные окружения.")
@@ -221,6 +229,26 @@ class NovelAIClient:
                 json=payload,
             )
 
+            if r.status_code == 500 and self._payload_uses_character_payload(payload):
+                log.warning(
+                    "NovelAI returned 500 for character payload, retrying with fallback concat: %s",
+                    self._safe_response_diagnostics(r),
+                )
+                if on_character_payload_fallback:
+                    await on_character_payload_fallback()
+                payload = self.build_payload(
+                    prompt,
+                    settings,
+                    image_b64=image_b64,
+                    mask_b64=mask_b64,
+                    force_character_concat=True,
+                )
+                r = await client.post(
+                    f"{self.base_url}/ai/generate-image",
+                    headers=self._headers(),
+                    json=payload,
+                )
+
         if r.status_code >= 400:
             error_text = self._friendly_api_error(r)
             log.warning("NovelAI image API error: %s", self._safe_response_diagnostics(r))
@@ -235,6 +263,16 @@ class NovelAIClient:
             return [data]
 
         raise NovelAIError(f"Неожиданный ответ NovelAI: content-type={content_type or 'unknown'}")
+
+
+    @staticmethod
+    def _payload_uses_character_payload(payload: dict) -> bool:
+        parameters = payload.get("parameters", {})
+        return bool(
+            parameters.get("v4_prompt", {})
+            .get("caption", {})
+            .get("char_captions")
+        )
 
     def _extract_images_from_zip(self, data: bytes) -> list[bytes]:
         images: list[bytes] = []

@@ -84,6 +84,8 @@ def assemble_ar_prompt(s, character_prompt: str) -> str:
     return ", ".join(part.strip() for part in [s.artraccoon_base_prompt, character_prompt] if part.strip())
 
 def ar_payload_mode(s) -> str:
+    if s.artraccoon_force_concat:
+        return "fallback concat (forced)"
     model = NAI_MODEL or MODELS.get(s.model_name, "")
     return "Character Payload for v4/v4.5" if model.startswith(("nai-diffusion-4", "nai-diffusion-4-5")) else "fallback concat"
 
@@ -430,6 +432,20 @@ async def ar_show_cmd(message: types.Message):
     for label, value in [("Base Prompt", s.artraccoon_base_prompt), ("Base UC", s.artraccoon_base_uc), ("Character Prompt", s.artraccoon_character_prompt), ("Character UC", s.artraccoon_character_uc or s.artraccoon_character_negative), ("Character Position", s.artraccoon_character_position)]:
         await message.answer(f"<b>{label}</b>\n<code>{html.escape(value or '—')}</code>", parse_mode="HTML")
 
+@dp.message(Command("ar_payload"))
+async def ar_payload_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    if message.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+        await message.answer("Команда не найдена.")
+        return
+    s = patch_settings(message.from_user.id, artraccoon_force_concat=not s.artraccoon_force_concat)
+    await message.answer(
+        "🧪 <b>ArtRaccoon payload mode</b>\n"
+        f"Character Payload: <code>{'OFF' if s.artraccoon_force_concat else 'ON'}</code>\n"
+        f"Fallback concat: <code>{'ON' if s.artraccoon_force_concat else 'OFF'}</code>",
+        parse_mode="HTML",
+    )
+
 @dp.message(Command("ar_show_payload"))
 async def ar_show_payload_cmd(message: types.Message):
     s = get_settings(message.from_user.id)
@@ -447,6 +463,8 @@ async def ar_show_payload_cmd(message: types.Message):
         f"Model: <code>{html.escape(str(preview['model']))}</code>",
         f"Base Prompt length: <code>{preview['base_prompt_length']}</code>",
         f"Character Prompt length: <code>{preview['character_prompt_length']}</code>",
+        f"Current mode: <code>{html.escape(ar_payload_mode(s))}</code>",
+        f"Fallback forced: <code>{'yes' if s.artraccoon_force_concat else 'no'}</code>",
         f"Has character payload: <code>{'yes' if preview['has_character_payload'] else 'no'}</code>",
         f"Negative parts summary: <code>{html.escape(negatives)}</code>",
     ]
@@ -545,8 +563,16 @@ async def generate_image_from_prompt(
         await message.bot.download_file(file.file_path, destination=bio)
         image_bytes = bio.getvalue()
 
+    async def show_character_payload_fallback() -> None:
+        await wait.edit_text("NovelAI не принял Character Payload, пробую fallback-сборку.")
+
     try:
-        images = await nai.generate(prompt, s, image_bytes=image_bytes)
+        images = await nai.generate(
+            prompt,
+            s,
+            image_bytes=image_bytes,
+            on_character_payload_fallback=show_character_payload_fallback,
+        )
         add_history(user_id, {"prompt": prompt, "seed": s.seed, "model": s.model_name, "size": f"{s.width}x{s.height}", "timestamp": datetime.now(timezone.utc).isoformat()})
         patch_settings(user_id, pending_image_path="")
         await wait.delete()
