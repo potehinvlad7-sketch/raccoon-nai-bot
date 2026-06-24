@@ -9,6 +9,8 @@ MODELS = {
 }
 
 # Не все sampler могут быть доступны для каждой модели.
+NOISE_SCHEDULES = ["karras", "native", "exponential", "polyexponential"]
+
 SAMPLERS = [
     "k_euler",
     "k_euler_ancestral",
@@ -80,6 +82,10 @@ class UserSettings:
     add_quality_tags: bool = True
     last_prompt: str = ""
     pending_prompt: str = ""
+    last_image_path: str = ""
+    pending_image_path: str = ""
+    img2img_strength: float = 0.55
+    img2img_noise: float = 0.10
 
     # Служебный режим для текстового UX: append или replace.
     prompt_action: str = ""

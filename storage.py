@@ -27,7 +27,7 @@ def get_settings(user_id: int) -> UserSettings:
     data = load_all()
     raw = data.get(str(user_id), {})
     defaults = UserSettings().to_dict()
-    defaults.update(raw)
+    defaults.update({k: v for k, v in raw.items() if k in defaults})
     return UserSettings(**defaults)
 
 def save_settings(user_id: int, settings: UserSettings) -> None:
@@ -42,3 +42,30 @@ def patch_settings(user_id: int, **kwargs) -> UserSettings:
             setattr(settings, key, value)
     save_settings(user_id, settings)
     return settings
+
+
+def add_history(user_id: int, item: dict, limit: int = 20) -> None:
+    data = load_all()
+    key = str(user_id)
+    user = data.setdefault(key, get_settings(user_id).to_dict())
+    history = user.setdefault("history", [])
+    history.insert(0, item)
+    del history[limit:]
+    save_all(data)
+
+def get_history(user_id: int) -> list[dict]:
+    data = load_all()
+    return list(data.get(str(user_id), {}).get("history", []))
+
+def add_favorite(user_id: int, item: dict, limit: int = 50) -> None:
+    data = load_all()
+    key = str(user_id)
+    user = data.setdefault(key, get_settings(user_id).to_dict())
+    favorites = user.setdefault("favorites", [])
+    favorites.insert(0, item)
+    del favorites[limit:]
+    save_all(data)
+
+def get_favorites(user_id: int) -> list[dict]:
+    data = load_all()
+    return list(data.get(str(user_id), {}).get("favorites", []))

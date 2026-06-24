@@ -3,6 +3,8 @@ import logging
 import os
 import html
 from io import BytesIO
+from pathlib import Path
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -12,13 +14,17 @@ from aiogram.types import BufferedInputFile
 from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 
-from config_defaults import QUICK_PRESETS, RESOLUTIONS
+from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES
 from keyboards import (
     main_menu as base_main_menu, settings_menu, model_menu, size_menu, sampler_menu,
-    uc_menu, numeric_menu, modes_menu, presets_menu, pending_prompt_menu
+    uc_menu, numeric_menu, modes_menu, presets_menu, pending_prompt_menu,
+    after_generation_menu, noise_menu
 )
 from app.services.nai_client import NovelAIClient, NovelAIError
-from storage import get_settings, save_settings, patch_settings
+from storage import (
+    get_settings, save_settings, patch_settings, add_history, get_history,
+    add_favorite, get_favorites
+)
 
 load_dotenv()
 
@@ -44,6 +50,9 @@ nai = NovelAIClient(NOVELAI_TOKEN, default_model=NAI_MODEL, proxy_url=PROXY_URL)
 class GenState(StatesGroup):
     waiting_prompt = State()
 
+TMP_DIR = Path("data/tmp_images")
+TMP_DIR.mkdir(parents=True, exist_ok=True)
+
 def main_menu():
     return base_main_menu(CHANNEL_URL)
 
@@ -61,7 +70,7 @@ async def show_pending_prompt(message: types.Message, user_id: int) -> None:
     await message.answer(
         prompt_preview_text(s.pending_prompt),
         parse_mode="HTML",
-        reply_markup=pending_prompt_menu(),
+        reply_markup=pending_prompt_menu(bool(s.pending_image_path)),
     )
 
 def settings_text(user_id: int) -> str:
@@ -79,7 +88,10 @@ def settings_text(user_id: int) -> str:
         f"Negative: <code>{s.negative_prompt or '—'}</code>\n"
         f"Furry: <code>{s.furry_mode}</code>\n"
         f"Background: <code>{s.background_mode}</code>\n"
-        f"Quality tags: <code>{s.add_quality_tags}</code>"
+        f"Quality tags: <code>{s.add_quality_tags}</code>\n"
+        f"CFG rescale: <code>{s.cfg_rescale}</code>\n"
+        f"Noise schedule: <code>{s.noise_schedule}</code>\n"
+        f"Img2Img: <code>{s.img2img_strength} / {s.img2img_noise}</code>"
     )
 
 def presets_text() -> str:
@@ -252,7 +264,9 @@ async def generate_image_from_prompt(
     wait = await message.answer("🎨 Генерирую...")
 
     image_bytes = None
-    if message.reply_to_message and message.reply_to_message.photo:
+    if s.pending_image_path and Path(s.pending_image_path).exists():
+        image_bytes = Path(s.pending_image_path).read_bytes()
+    elif message.reply_to_message and message.reply_to_message.photo:
         photo = message.reply_to_message.photo[-1]
         file = await message.bot.get_file(photo.file_id)
         bio = BytesIO()
@@ -261,6 +275,8 @@ async def generate_image_from_prompt(
 
     try:
         images = await nai.generate(prompt, s, image_bytes=image_bytes)
+        add_history(user_id, {"prompt": prompt, "seed": s.seed, "model": s.model_name, "size": f"{s.width}x{s.height}", "timestamp": datetime.now(timezone.utc).isoformat()})
+        patch_settings(user_id, pending_image_path="")
         await wait.delete()
 
         for idx, img in enumerate(images, start=1):
@@ -272,7 +288,7 @@ async def generate_image_from_prompt(
                     image,
                     caption=caption,
                     parse_mode="HTML",
-                    reply_markup=main_menu(),
+                    reply_markup=after_generation_menu(),
                 )
             except Exception:
                 log.exception("Failed to send image as photo, sending as document")
@@ -280,7 +296,7 @@ async def generate_image_from_prompt(
                     BufferedInputFile(img, filename=name),
                     caption=caption,
                     parse_mode="HTML",
-                    reply_markup=main_menu(),
+                    reply_markup=after_generation_menu(),
                 )
 
     except NovelAIError as e:
@@ -412,7 +428,7 @@ async def cb_img2img(call: types.CallbackQuery):
         "1. Отправь картинку боту\n"
         "2. Ответь на неё командой:\n"
         "<code>/gen что нужно получить</code>\n\n"
-        "Сейчас strength/noise стоят в коде по умолчанию: 0.55 / 0.10.",
+        "Strength/noise можно менять в ⚙️ Настройки → 📎 Img2Img сила.",
         reply_markup=main_menu(),
         parse_mode="HTML",
     )
@@ -431,11 +447,11 @@ async def cb_preset_show(call: types.CallbackQuery):
         await call.answer("Пресет не найден", show_alert=True)
         return
     prompt = preset["prompt"]
-    patch_settings(call.from_user.id, pending_prompt=prompt, prompt_action="")
+    current = patch_settings(call.from_user.id, pending_prompt=prompt, prompt_action="")
     await call.message.edit_text(
         f"✍️ <b>{preset['title']}</b> — сохранила как черновик.\n\n"
         + prompt_preview_text(prompt),
-        reply_markup=pending_prompt_menu(),
+        reply_markup=pending_prompt_menu(bool(current.pending_image_path)),
         parse_mode="HTML",
     )
     await call.answer("Промт готов")
@@ -546,6 +562,21 @@ async def cb_negative(call: types.CallbackQuery):
     )
     await call.answer()
 
+@dp.callback_query(F.data == "settings:cfg")
+async def cb_cfg(call: types.CallbackQuery):
+    await call.message.edit_text("CFG rescale:", reply_markup=numeric_menu("cfg", ["0", "0.2", "0.4", "0.6", "0.8", "1.0"]))
+    await call.answer()
+
+@dp.callback_query(F.data == "settings:noise")
+async def cb_noise(call: types.CallbackQuery):
+    await call.message.edit_text("Noise schedule:", reply_markup=noise_menu())
+    await call.answer()
+
+@dp.callback_query(F.data == "settings:img2img")
+async def cb_img2img_settings(call: types.CallbackQuery):
+    await call.message.edit_text("Img2Img strength / noise:", reply_markup=numeric_menu("img2img", ["0.35/0.05", "0.50/0.10", "0.65/0.15", "0.75/0.20"]))
+    await call.answer()
+
 @dp.callback_query(F.data == "settings:modes")
 async def cb_modes(call: types.CallbackQuery):
     s = get_settings(call.from_user.id)
@@ -555,6 +586,119 @@ async def cb_modes(call: types.CallbackQuery):
     )
     await call.answer()
 
+
+
+
+def _history_lines(items: list[dict], title: str) -> str:
+    if not items:
+        return f"{title}\n\nПока пусто. Сгенерируй картинку и возвращайся сюда 🦝"
+    lines = [title, ""]
+    for i, item in enumerate(items[:10], start=1):
+        prompt = html.escape(str(item.get("prompt", ""))[:180])
+        lines.append(
+            f"{i}. <code>{prompt}</code>\n"
+            f"   🎲 <code>{item.get('seed', '—')}</code> · "
+            f"🧠 <code>{html.escape(str(item.get('model', '—')))}</code> · "
+            f"📐 <code>{item.get('size', '—')}</code>"
+        )
+    return "\n".join(lines)
+
+def _last_generation_item(user_id: int) -> dict | None:
+    s = get_settings(user_id)
+    if not s.last_prompt:
+        return None
+    return {
+        "prompt": s.last_prompt,
+        "seed": s.seed,
+        "model": s.model_name,
+        "size": f"{s.width}x{s.height}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+def transform_prompt(prompt: str, tool: str) -> str:
+    p = " ".join(prompt.replace("\n", ", ").split())
+    if tool == "clean":
+        parts = []
+        for part in [x.strip() for x in p.split(",")]:
+            if part and part.lower() not in [x.lower() for x in parts]:
+                parts.append(part)
+        return ", ".join(parts)
+    if tool == "translate":
+        ru = {"девушка": "girl", "енот": "raccoon", "лес": "forest", "город": "city", "кошка": "cat", "портрет": "portrait", "красивый": "beautiful", "ночь": "night"}
+        for src, dst in ru.items():
+            p = p.replace(src, dst)
+        return p
+    additions = {
+        "improve": "best composition, expressive lighting, detailed background, cohesive color palette, sharp focus",
+        "raccoon": "ArtRaccoon vibe, cozy mischievous raccoon energy, warm cinematic light, whimsical details",
+        "aelita": "Aelita, elegant retro-futuristic princess from Mars, silver crown, red desert palace",
+    }
+    return f"{p}, {additions.get(tool, '')}".strip(", ")
+
+@dp.message(Command("history"))
+async def history_cmd(message: types.Message):
+    await message.answer(_history_lines(get_history(message.from_user.id), "🕘 <b>История генераций</b>"), parse_mode="HTML", reply_markup=main_menu())
+
+@dp.message(Command("favorites"))
+async def favorites_cmd(message: types.Message):
+    await message.answer(_history_lines(get_favorites(message.from_user.id), "⭐ <b>Избранное</b>"), parse_mode="HTML", reply_markup=main_menu())
+
+@dp.callback_query(F.data == "menu:history")
+async def cb_history(call: types.CallbackQuery):
+    await call.message.edit_text(_history_lines(get_history(call.from_user.id), "🕘 <b>История генераций</b>"), parse_mode="HTML", reply_markup=main_menu())
+    await call.answer()
+
+@dp.callback_query(F.data == "menu:favorites")
+async def cb_favorites(call: types.CallbackQuery):
+    await call.message.edit_text(_history_lines(get_favorites(call.from_user.id), "⭐ <b>Избранное</b>"), parse_mode="HTML", reply_markup=main_menu())
+    await call.answer()
+
+@dp.callback_query(F.data == "favorite:last")
+async def cb_favorite_last(call: types.CallbackQuery):
+    item = _last_generation_item(call.from_user.id)
+    if not item:
+        await call.answer("Пока нечего добавить", show_alert=True)
+        return
+    add_favorite(call.from_user.id, item)
+    await call.answer("Добавлено в избранное ⭐")
+
+@dp.callback_query(F.data.in_({"menu:inpaint", "menu:reference", "menu:upscale"}))
+async def cb_placeholders(call: types.CallbackQuery):
+    texts = {
+        "menu:inpaint": "🩹 Inpaint needs mask support and will be added next.",
+        "menu:reference": "🧬 Reference workflow will be added next.",
+        "menu:upscale": "🔍 Upscale / Enhance будет добавлен следующим безопасным шагом.",
+    }
+    await call.message.edit_text(texts[call.data], reply_markup=main_menu())
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("tool:"))
+async def cb_prompt_tool(call: types.CallbackQuery):
+    tool = call.data.split(":", 1)[1]
+    s = get_settings(call.from_user.id)
+    if not s.pending_prompt.strip():
+        await call.answer("Сначала пришли промт", show_alert=True)
+        return
+    prompt = transform_prompt(s.pending_prompt, tool)
+    patch_settings(call.from_user.id, pending_prompt=prompt)
+    await call.message.edit_text(prompt_preview_text(prompt), parse_mode="HTML", reply_markup=pending_prompt_menu(bool(s.pending_image_path)))
+    await call.answer("Промт обновлён")
+
+@dp.message(F.photo)
+async def photo_message(message: types.Message):
+    if message.from_user is None:
+        return
+    photo = message.photo[-1]
+    file = await message.bot.get_file(photo.file_id)
+    path = TMP_DIR / f"{message.from_user.id}_{message.message_id}.jpg"
+    with path.open("wb") as f:
+        await message.bot.download_file(file.file_path, destination=f)
+    patch_settings(message.from_user.id, pending_image_path=str(path))
+    await message.answer(
+        "📎 Картинку сохранила для Img2Img. Теперь пришли промт обычным сообщением или командой /gen prompt.\n"
+        "Силу можно менять в ⚙️ Настройки → 📎 Img2Img сила.",
+        reply_markup=main_menu(),
+    )
 
 @dp.message(Command("cancel"))
 async def cancel_cmd(message: types.Message, state: FSMContext):
@@ -586,6 +730,9 @@ async def negative_cmd(message: types.Message):
 @dp.callback_query(F.data.startswith("set:model:"))
 async def set_model(call: types.CallbackQuery):
     name = call.data.split(":", 2)[2]
+    if name not in MODELS:
+        await call.answer("Неизвестная модель", show_alert=True)
+        return
     patch_settings(call.from_user.id, model_name=name)
     await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
     await call.answer("Модель обновлена")
@@ -606,6 +753,9 @@ async def set_size(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("set:sampler:"))
 async def set_sampler(call: types.CallbackQuery):
     sampler = call.data.split(":", 2)[2]
+    if sampler not in SAMPLERS:
+        await call.answer("Неизвестный sampler", show_alert=True)
+        return
     patch_settings(call.from_user.id, sampler=sampler)
     await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
     await call.answer("Sampler обновлён")
@@ -613,6 +763,9 @@ async def set_sampler(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("set:uc:"))
 async def set_uc(call: types.CallbackQuery):
     uc = call.data.split(":", 2)[2]
+    if uc not in UC_PRESETS:
+        await call.answer("Неизвестный UC preset", show_alert=True)
+        return
     patch_settings(call.from_user.id, uc_preset=uc)
     await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
     await call.answer("UC обновлён")
@@ -644,6 +797,40 @@ async def set_seed(call: types.CallbackQuery):
     patch_settings(call.from_user.id, seed=val)
     await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
     await call.answer("Seed обновлён")
+
+
+@dp.callback_query(F.data.startswith("set:cfg:"))
+async def set_cfg(call: types.CallbackQuery):
+    try:
+        val = max(0.0, min(1.0, float(call.data.split(":", 2)[2])))
+    except ValueError:
+        await call.answer("Некорректное значение", show_alert=True)
+        return
+    patch_settings(call.from_user.id, cfg_rescale=val)
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.answer("CFG rescale обновлён")
+
+@dp.callback_query(F.data.startswith("set:noise:"))
+async def set_noise(call: types.CallbackQuery):
+    val = call.data.split(":", 2)[2]
+    if val not in NOISE_SCHEDULES:
+        await call.answer("Неизвестный noise schedule", show_alert=True)
+        return
+    patch_settings(call.from_user.id, noise_schedule=val)
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.answer("Noise schedule обновлён")
+
+@dp.callback_query(F.data.startswith("set:img2img:"))
+async def set_img2img(call: types.CallbackQuery):
+    raw = call.data.split(":", 2)[2]
+    try:
+        strength, noise = [float(x) for x in raw.split("/", 1)]
+    except ValueError:
+        await call.answer("Некорректное значение", show_alert=True)
+        return
+    patch_settings(call.from_user.id, img2img_strength=strength, img2img_noise=noise)
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.answer("Img2Img обновлён")
 
 @dp.callback_query(F.data == "toggle:furry")
 async def toggle_furry(call: types.CallbackQuery):

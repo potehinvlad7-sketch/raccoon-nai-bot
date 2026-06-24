@@ -108,8 +108,8 @@ class NovelAIClient:
             action = "img2img"
             parameters.update({
                 "image": image_b64,
-                "strength": 0.55,
-                "noise": 0.10,
+                "strength": settings.img2img_strength,
+                "noise": settings.img2img_noise,
             })
         if mask_b64:
             action = "infill"
