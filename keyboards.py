@@ -13,37 +13,42 @@ def main_menu(channel_url: str = "") -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔁 Повторить", callback_data="quick:retry"),
         InlineKeyboardButton(text="🕘 История", callback_data="menu:history"),
         InlineKeyboardButton(text="⭐ Избранное", callback_data="menu:favorites"),
-        InlineKeyboardButton(text="🩹 Inpaint", callback_data="menu:inpaint"),
-        InlineKeyboardButton(text="🧬 Vibe / Reference", callback_data="menu:reference"),
-        InlineKeyboardButton(text="🔍 Upscale / Enhance", callback_data="menu:upscale"),
+        InlineKeyboardButton(text="🩹 Инпейнт", callback_data="menu:inpaint"),
+        InlineKeyboardButton(text="🧬 Референс / вайб", callback_data="menu:reference"),
+        InlineKeyboardButton(text="🔍 Апскейл", callback_data="menu:upscale"),
         InlineKeyboardButton(text="🌐 NovelAI", url="https://novelai.net/image"),
     ]
     if channel_url:
         buttons.append(InlineKeyboardButton(text="📢 Канал", url=channel_url))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
 
-def pending_prompt_menu(has_image: bool = False) -> InlineKeyboardMarkup:
+def pending_prompt_menu(has_image: bool = False, pro: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(text="✅ Генерировать", callback_data="prompt:confirm"),
-        InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
-        InlineKeyboardButton(text="📐 Размер", callback_data="settings:size"),
-        InlineKeyboardButton(text="🧠 Модель", callback_data="settings:model"),
-        InlineKeyboardButton(text="🎛 Сэмплер", callback_data="settings:sampler"),
-        InlineKeyboardButton(text="👣 Шаги", callback_data="settings:steps"),
-        InlineKeyboardButton(text="🧲 CFG / сила промта", callback_data="settings:scale"),
-        InlineKeyboardButton(text="🎲 Seed", callback_data="settings:seed"),
-        InlineKeyboardButton(text="🚫 Негатив", callback_data="settings:negative"),
-        InlineKeyboardButton(text="🧪 UC-пресет", callback_data="settings:uc"),
-        InlineKeyboardButton(text="🖼 Кол-во картинок", callback_data="settings:n"),
-        InlineKeyboardButton(text="✨ Улучшить промт", callback_data="tool:improve"),
-        InlineKeyboardButton(text="🧹 Почистить", callback_data="tool:clean"),
-        InlineKeyboardButton(text="🇬🇧 Перевести в теги", callback_data="tool:translate"),
-        InlineKeyboardButton(text="📝 Показать исходник", callback_data="prompt:show_original"),
-        InlineKeyboardButton(text="🦝 ArtRaccoon vibe", callback_data="tool:raccoon"),
-        InlineKeyboardButton(text="👧 Добавить Аэлиту", callback_data="tool:aelita"),
-        InlineKeyboardButton(text="📎 Img2Img" + (" ✅" if has_image else ""), callback_data="menu:img2img"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="prompt:cancel"),
+        InlineKeyboardButton(text="✏️ Дописать", callback_data="prompt:append"),
+        InlineKeyboardButton(text="🔁 Заменить", callback_data="prompt:replace"),
+        InlineKeyboardButton(text="🇬🇧 В теги", callback_data="tool:translate"),
     ]
+    if pro:
+        buttons.extend([
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
+            InlineKeyboardButton(text="📐 Размер", callback_data="settings:size"),
+            InlineKeyboardButton(text="🧠 Модель", callback_data="settings:model"),
+            InlineKeyboardButton(text="🎛 Сэмплер", callback_data="settings:sampler"),
+            InlineKeyboardButton(text="👣 Шаги", callback_data="settings:steps"),
+            InlineKeyboardButton(text="🧲 CFG / сила промта", callback_data="settings:scale"),
+            InlineKeyboardButton(text="🎲 Seed", callback_data="settings:seed"),
+            InlineKeyboardButton(text="🚫 Негатив", callback_data="settings:negative"),
+            InlineKeyboardButton(text="🧪 UC-пресет", callback_data="settings:uc"),
+            InlineKeyboardButton(text="🖼 Кол-во картинок", callback_data="settings:n"),
+            InlineKeyboardButton(text="✨ Улучшить промт", callback_data="tool:improve"),
+            InlineKeyboardButton(text="🧹 Почистить", callback_data="tool:clean"),
+            InlineKeyboardButton(text="📝 Показать исходник", callback_data="prompt:show_original"),
+            InlineKeyboardButton(text="🦝 ArtRaccoon vibe", callback_data="tool:raccoon"),
+            InlineKeyboardButton(text="👧 Добавить Аэлиту", callback_data="tool:aelita"),
+            InlineKeyboardButton(text="📎 Img2Img" + (" ✅" if has_image else ""), callback_data="menu:img2img"),
+        ])
+    buttons.append(InlineKeyboardButton(text="❌ Отмена", callback_data="prompt:cancel"))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
 
 def after_generation_menu() -> InlineKeyboardMarkup:
@@ -63,24 +68,29 @@ def presets_menu() -> InlineKeyboardMarkup:
     buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main"))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
 
-def settings_menu() -> InlineKeyboardMarkup:
+def settings_menu(pro: bool = True) -> InlineKeyboardMarkup:
     buttons = [
-        InlineKeyboardButton(text="🧠 Модель", callback_data="settings:model"),
         InlineKeyboardButton(text="📐 Размер", callback_data="settings:size"),
-        InlineKeyboardButton(text="🖼 Кол-во картинок", callback_data="settings:n"),
-        InlineKeyboardButton(text="👣 Шаги", callback_data="settings:steps"),
-        InlineKeyboardButton(text="🧲 CFG / сила промта", callback_data="settings:scale"),
         InlineKeyboardButton(text="🎲 Seed", callback_data="settings:seed"),
-        InlineKeyboardButton(text="🎛 Сэмплер", callback_data="settings:sampler"),
         InlineKeyboardButton(text="🚫 Негатив", callback_data="settings:negative"),
-        InlineKeyboardButton(text="🧪 UC-пресет", callback_data="settings:uc"),
-        InlineKeyboardButton(text="♻️ CFG rescale", callback_data="settings:cfg"),
-        InlineKeyboardButton(text="🌊 Noise", callback_data="settings:noise"),
-        InlineKeyboardButton(text="📎 Img2Img сила", callback_data="settings:img2img"),
-        InlineKeyboardButton(text="💎 PRO / Анласы", callback_data="toggle:pro"),
-        InlineKeyboardButton(text="🦝 Режимы", callback_data="settings:modes"),
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main"),
+        InlineKeyboardButton(text="🧠 Модель", callback_data="settings:model"),
     ]
+    if pro:
+        buttons.extend([
+            InlineKeyboardButton(text="🖼 Кол-во картинок", callback_data="settings:n"),
+            InlineKeyboardButton(text="👣 Шаги", callback_data="settings:steps"),
+            InlineKeyboardButton(text="🧲 CFG / сила промта", callback_data="settings:scale"),
+            InlineKeyboardButton(text="🎛 Сэмплер", callback_data="settings:sampler"),
+            InlineKeyboardButton(text="🧪 UC-пресет", callback_data="settings:uc"),
+            InlineKeyboardButton(text="♻️ CFG rescale", callback_data="settings:cfg"),
+            InlineKeyboardButton(text="🌊 Noise", callback_data="settings:noise"),
+            InlineKeyboardButton(text="📎 Img2Img сила", callback_data="settings:img2img"),
+            InlineKeyboardButton(text="🦝 Режимы", callback_data="settings:modes"),
+        ])
+    buttons.extend([
+        InlineKeyboardButton(text="💎 PRO / Анласы", callback_data="toggle:pro"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main"),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
 
 def model_menu() -> InlineKeyboardMarkup:
@@ -120,5 +130,17 @@ def modes_menu(furry: bool, background: bool, quality: bool) -> InlineKeyboardMa
         InlineKeyboardButton(text=f"🌄 Background: {'ON' if background else 'OFF'}", callback_data="toggle:background"),
         InlineKeyboardButton(text=f"✨ Quality tags: {'ON' if quality else 'OFF'}", callback_data="toggle:quality"),
         InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+
+def artraccoon_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="📜 Базовый промт", callback_data="ar:edit:base"),
+        InlineKeyboardButton(text="🚫 Базовый негатив", callback_data="ar:edit:base_uc"),
+        InlineKeyboardButton(text="👤 Негатив персонажа", callback_data="ar:edit:char_neg"),
+        InlineKeyboardButton(text="🧪 Тест сборки", callback_data="ar:test"),
+        InlineKeyboardButton(text="⚙️ Настройки генерации", callback_data="menu:settings"),
+        InlineKeyboardButton(text="❌ Выйти из ArtRaccoon режима", callback_data="ar:exit"),
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))

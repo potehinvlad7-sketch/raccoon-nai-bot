@@ -57,9 +57,12 @@ class NovelAIClient:
         mask_b64: Optional[str] = None,
     ) -> dict:
         model = self.default_model or MODELS.get(settings.model_name) or SAFE_DEFAULT_MODEL
-        uc = UC_PRESETS.get(settings.uc_preset, "")
+        uc_parts = [UC_PRESETS.get(settings.uc_preset, "")]
+        if settings.artraccoon_mode:
+            uc_parts.extend([settings.artraccoon_base_uc, settings.artraccoon_character_negative])
         if settings.negative_prompt.strip():
-            uc = (uc + ", " + settings.negative_prompt.strip()).strip(", ")
+            uc_parts.append(settings.negative_prompt.strip())
+        uc = ", ".join(part.strip() for part in uc_parts if part and part.strip())
 
         built_prompt = self.build_prompt(prompt, settings)
         is_v4_model = model.startswith(("nai-diffusion-4", "nai-diffusion-4-5"))

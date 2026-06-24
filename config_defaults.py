@@ -75,6 +75,10 @@ class UserSettings:
     sampler: str = "k_euler_ancestral"
     n_samples: int = 1
     pro_mode: bool = False
+    artraccoon_mode: bool = False
+    artraccoon_base_prompt: str = ""
+    artraccoon_base_uc: str = ""
+    artraccoon_character_negative: str = ""
     seed: int = -1
     uc_preset: str = "v4.5_full_heavy"
     negative_prompt: str = ""

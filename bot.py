@@ -18,7 +18,7 @@ from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRE
 from keyboards import (
     main_menu as base_main_menu, settings_menu, model_menu, size_menu, sampler_menu,
     uc_menu, numeric_menu, modes_menu, presets_menu, pending_prompt_menu,
-    after_generation_menu, noise_menu
+    after_generation_menu, noise_menu, artraccoon_menu
 )
 from app.services.nai_client import NovelAIClient, NovelAIError
 from prompt_tools import natural_to_nai_tags, looks_like_english_tags
@@ -50,6 +50,9 @@ nai = NovelAIClient(NOVELAI_TOKEN, default_model=NAI_MODEL, proxy_url=PROXY_URL)
 
 class GenState(StatesGroup):
     waiting_prompt = State()
+    waiting_ar_base = State()
+    waiting_ar_base_uc = State()
+    waiting_ar_char_neg = State()
 
 TMP_DIR = Path("data/tmp_images")
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -57,8 +60,22 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 def main_menu():
     return base_main_menu(CHANNEL_URL)
 
-SAFE_RESOLUTIONS = {(832, 1216), (1216, 832), (1024, 1024), (768, 1344), (1344, 768), (512, 768)}
+SAFE_RESOLUTIONS = {(512, 768), (768, 1344), (832, 1216), (1024, 1024), (1216, 832)}
 ANLAS_WARNING = "Это может тратить Anlas. Включи 💎 PRO / Анласы, если хочешь разрешить дорогие режимы."
+
+def assemble_ar_prompt(s, character_prompt: str) -> str:
+    return ", ".join(part.strip() for part in [s.artraccoon_base_prompt, character_prompt] if part.strip())
+
+def art_prompt_preview_text(s) -> str:
+    character = s.pending_original_prompt or s.pending_prompt
+    final = s.pending_prompt
+    base = s.artraccoon_base_prompt or "—"
+    return (
+        "🦝 <b>ArtRaccoon сборка. Запускаем?</b>\n\n"
+        f"<b>Base Prompt:</b>\n<code>{html.escape(base[:1200])}</code>\n\n"
+        f"<b>Character Prompt:</b>\n<code>{html.escape(character[:1200])}</code>\n\n"
+        f"<b>Final Prompt:</b>\n<code>{html.escape(final[:3000])}</code>"
+    )
 
 def prompt_preview_text(prompt: str, original: str = "") -> str:
     if original and original.strip() and original.strip() != prompt.strip():
@@ -81,6 +98,8 @@ def apply_anlas_safe_defaults(user_id: int):
     updates = {}
     if s.n_samples != 1:
         updates["n_samples"] = 1
+    if s.steps > 28:
+        updates["steps"] = 28
     if (s.width, s.height) not in SAFE_RESOLUTIONS:
         updates.update({"width": 832, "height": 1216})
     if updates:
@@ -92,10 +111,11 @@ async def show_pending_prompt(message: types.Message, user_id: int) -> None:
     if not s.pending_prompt:
         await message.answer("📝 Черновик пуст. Пришли новый промт обычным сообщением.", reply_markup=main_menu())
         return
+    preview = art_prompt_preview_text(s) if s.artraccoon_mode else prompt_preview_text(s.pending_prompt, s.pending_original_prompt)
     await message.answer(
-        prompt_preview_text(s.pending_prompt, s.pending_original_prompt),
+        preview,
         parse_mode="HTML",
-        reply_markup=pending_prompt_menu(bool(s.pending_image_path)),
+        reply_markup=pending_prompt_menu(bool(s.pending_image_path), s.pro_mode or s.artraccoon_mode),
     )
 
 def settings_text(user_id: int) -> str:
@@ -104,7 +124,7 @@ def settings_text(user_id: int) -> str:
         "⚙️ <b>Текущие настройки</b>\n\n"
         f"Модель: <code>{s.model_name}</code>\n"
         f"Размер: <code>{s.width}x{s.height}</code>\n"
-        f"Режим: <code>{'PRO' if s.pro_mode else 'Экономный'}</code>\n"
+        f"Режим: <code>{'ArtRaccoon' if s.artraccoon_mode else ('PRO' if s.pro_mode else 'Обычный')}</code>\n"
         f"Картинок: <code>{s.n_samples}</code>\n"
         f"Steps: <code>{s.steps}</code>\n"
         f"Guidance: <code>{s.scale}</code>\n"
@@ -120,6 +140,23 @@ def settings_text(user_id: int) -> str:
         f"Img2Img: <code>{s.img2img_strength} / {s.img2img_noise}</code>\n"
         f"Промт переведён из русского: <code>{bool(s.pending_original_prompt and s.pending_original_prompt != s.pending_prompt)}</code>"
     )
+
+
+def settings_markup_for(user_id: int):
+    s = get_settings(user_id)
+    return settings_menu(s.pro_mode or s.artraccoon_mode)
+
+def prompt_menu_for(s):
+    return pending_prompt_menu(bool(s.pending_image_path), s.pro_mode or s.artraccoon_mode)
+
+def prepare_prompt_for_user(user_id: int, text: str, force_tags: bool = False) -> tuple[str, str]:
+    s = get_settings(user_id)
+    if s.artraccoon_mode:
+        character = text if (looks_like_english_tags(text) or "," in text) and not force_tags else natural_to_nai_tags(text)
+        return assemble_ar_prompt(s, character), character
+    converted = natural_to_nai_tags(text)
+    original = "" if converted == text and looks_like_english_tags(text) else text
+    return converted, original
 
 def presets_text() -> str:
     lines = [
@@ -204,13 +241,63 @@ async def help_cmd(message: types.Message):
         "Для img2img: отправь картинку, потом ответь на неё командой /gen prompt."
     )
 
+@dp.message(Command("xxx"))
+async def xxx_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    pro_ui = s.pro_mode or s.artraccoon_mode
+    await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(pro_ui), parse_mode="HTML")
+
 @dp.message(Command("generation_settings"))
 async def generation_settings_cmd(message: types.Message):
-    await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    s = get_settings(message.from_user.id)
+    await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(s.pro_mode or s.artraccoon_mode), parse_mode="HTML")
 
 @dp.message(Command("settings"))
 async def settings_cmd(message: types.Message):
-    await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    s = get_settings(message.from_user.id)
+    await message.answer(settings_text(message.from_user.id), reply_markup=settings_menu(s.pro_mode or s.artraccoon_mode), parse_mode="HTML")
+
+@dp.message(Command("pro"))
+async def pro_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    patch_settings(message.from_user.id, pro_mode=not s.pro_mode)
+    s = get_settings(message.from_user.id)
+    await message.answer("💎 PRO режим включён. Расширенные функции могут тратить Anlas." if s.pro_mode else "✅ Обычный режим включён. Дорогие функции скрыты.", reply_markup=settings_menu(s.pro_mode or s.artraccoon_mode))
+
+@dp.message(Command("ArtRaccoonon"))
+async def artraccoon_on_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    patch_settings(message.from_user.id, artraccoon_mode=True, pro_mode=True)
+    await message.answer("🦝 ArtRaccoon режим включён. Текст теперь считается Character Prompt.", reply_markup=artraccoon_menu())
+
+@dp.message(Command("ar"))
+async def ar_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    if message.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+        await message.answer("Команда не найдена.")
+        return
+    await message.answer("🦝 <b>ArtRaccoon панель</b>", parse_mode="HTML", reply_markup=artraccoon_menu())
+
+@dp.message(Command("ar_settings"))
+async def ar_settings_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    if message.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+        await message.answer("Команда не найдена.")
+        return
+    def brief(label, value):
+        return f"<b>{label}</b> ({len(value)} симв.):\n<code>{html.escape(value[:500] or '—')}</code>"
+    await message.answer("🦝 <b>ArtRaccoon настройки</b>\n\n" + "\n\n".join([brief("Base Prompt", s.artraccoon_base_prompt), brief("Base UC", s.artraccoon_base_uc), brief("Character Negative", s.artraccoon_character_negative)]), parse_mode="HTML", reply_markup=artraccoon_menu())
+
+@dp.message(Command("ar_show"))
+async def ar_show_cmd(message: types.Message):
+    s = get_settings(message.from_user.id)
+    if message.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+        await message.answer("Команда не найдена.")
+        return
+    for label, value in [("Base Prompt", s.artraccoon_base_prompt), ("Base UC", s.artraccoon_base_uc), ("Character Negative", s.artraccoon_character_negative)]:
+        await message.answer(f"<b>{label}</b>\n<code>{html.escape(value or '—')}</code>", parse_mode="HTML")
 
 @dp.message(Command("raw"))
 async def raw_cmd(message: types.Message):
@@ -355,6 +442,9 @@ async def gen_cmd(message: types.Message):
         )
         return
 
+    s = get_settings(message.from_user.id)
+    if s.artraccoon_mode:
+        prompt = assemble_ar_prompt(s, prompt)
     await generate_image_from_prompt(message, prompt)
 
 @dp.message(Command("presets"))
@@ -405,6 +495,9 @@ async def draw_cmd(message: types.Message):
         )
         return
 
+    s = get_settings(message.from_user.id)
+    if s.artraccoon_mode:
+        prompt = assemble_ar_prompt(s, prompt)
     await generate_image_from_prompt(message, prompt)
 
 @dp.callback_query(F.data == "menu:main")
@@ -419,7 +512,7 @@ async def cb_main(call: types.CallbackQuery):
 
 @dp.callback_query(F.data == "menu:settings")
 async def cb_settings(call: types.CallbackQuery):
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer()
 
 @dp.callback_query(F.data == "menu:gen")
@@ -483,7 +576,7 @@ async def cb_preset_show(call: types.CallbackQuery):
     await call.message.edit_text(
         f"✍️ <b>{preset['title']}</b> — сохранила как черновик.\n\n"
         + prompt_preview_text(prompt),
-        reply_markup=pending_prompt_menu(bool(current.pending_image_path)),
+        reply_markup=prompt_menu_for(current),
         parse_mode="HTML",
     )
     await call.answer("Промт готов")
@@ -520,7 +613,7 @@ async def cb_show_original(call: types.CallbackQuery):
     await call.message.edit_text(
         prompt_preview_text(s.pending_prompt, s.pending_original_prompt),
         parse_mode="HTML",
-        reply_markup=pending_prompt_menu(bool(s.pending_image_path)),
+        reply_markup=prompt_menu_for(s),
     )
     await call.answer("Показываю исходник")
 
@@ -603,7 +696,7 @@ async def cb_negative(call: types.CallbackQuery):
     await call.message.edit_text(
         "🚫 Чтобы задать negative prompt, напиши:\n"
         "<code>/negative bad hands, extra fingers</code>",
-        reply_markup=settings_menu(),
+        reply_markup=settings_markup_for(call.from_user.id),
         parse_mode="HTML",
     )
     await call.answer()
@@ -711,9 +804,9 @@ async def cb_placeholders(call: types.CallbackQuery):
         await call.message.edit_text("💎 Это PRO/Anlas-связанная функция. Сейчас она заблокирована в экономном режиме: может тратить Anlas. Включи 💎 PRO / Анласы, чтобы разрешить дорогие режимы.", reply_markup=main_menu())
     else:
         texts = {
-            "menu:inpaint": "🩹 Inpaint — PRO/Anlas-связанная функция. Поддержка масок будет добавлена позже.",
-            "menu:reference": "🧬 Reference — PRO/Anlas-связанная функция. Workflow будет добавлен позже.",
-            "menu:upscale": "🔍 Upscale / Enhance — PRO/Anlas-связанная функция и будет добавлена следующим безопасным шагом.",
+            "menu:inpaint": "🩹 Инпейнт — PRO/Anlas-связанная функция. Поддержка масок будет добавлена позже.",
+            "menu:reference": "🧬 Референс / вайб — PRO/Anlas-связанная функция. Workflow будет добавлен позже.",
+            "menu:upscale": "🔍 Апскейл — PRO/Anlas-связанная функция и будет добавлена следующим безопасным шагом.",
         }
         await call.message.edit_text(texts[call.data], reply_markup=main_menu())
     await call.answer()
@@ -726,9 +819,14 @@ async def cb_prompt_tool(call: types.CallbackQuery):
         await call.answer("Сначала пришли промт", show_alert=True)
         return
     source = s.pending_original_prompt or s.pending_prompt
-    prompt = transform_prompt(source if tool == "translate" else s.pending_prompt, tool)
-    patch_settings(call.from_user.id, pending_prompt=prompt, pending_original_prompt=source if tool == "translate" else s.pending_original_prompt)
-    await call.message.edit_text(prompt_preview_text(prompt, source if tool == "translate" else s.pending_original_prompt), parse_mode="HTML", reply_markup=pending_prompt_menu(bool(s.pending_image_path)))
+    if tool == "translate" and s.artraccoon_mode:
+        prompt, original = prepare_prompt_for_user(call.from_user.id, source, force_tags=True)
+    else:
+        prompt = transform_prompt(source if tool == "translate" else s.pending_prompt, tool)
+        original = source if tool == "translate" else s.pending_original_prompt
+    s = patch_settings(call.from_user.id, pending_prompt=prompt, pending_original_prompt=original)
+    preview = art_prompt_preview_text(s) if s.artraccoon_mode else prompt_preview_text(prompt, original)
+    await call.message.edit_text(preview, parse_mode="HTML", reply_markup=prompt_menu_for(s))
     await call.answer("Промт обновлён")
 
 @dp.message(F.photo)
@@ -755,6 +853,63 @@ async def cancel_cmd(message: types.Message, state: FSMContext):
     await message.answer("Отменила ввод промта и очистила черновик.", reply_markup=main_menu())
 
 
+
+@dp.callback_query(F.data.startswith("ar:edit:"))
+async def cb_ar_edit(call: types.CallbackQuery, state: FSMContext):
+    s = get_settings(call.from_user.id)
+    if call.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    field = call.data.split(":", 2)[2]
+    prompts = {
+        "base": (GenState.waiting_ar_base, "📜 Пришли новый Base Prompt."),
+        "base_uc": (GenState.waiting_ar_base_uc, "🚫 Пришли новый Base UC / базовый негатив."),
+        "char_neg": (GenState.waiting_ar_char_neg, "👤 Пришли новый негатив персонажа."),
+    }
+    target = prompts.get(field)
+    if not target:
+        await call.answer("Неизвестное действие", show_alert=True)
+        return
+    await state.set_state(target[0])
+    await call.message.answer(target[1])
+    await call.answer()
+
+@dp.callback_query(F.data == "ar:test")
+async def cb_ar_test(call: types.CallbackQuery):
+    s = get_settings(call.from_user.id)
+    if call.from_user.id not in ADMIN_IDS or not s.artraccoon_mode:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    await call.message.edit_text(art_prompt_preview_text(s), parse_mode="HTML", reply_markup=artraccoon_menu())
+    await call.answer("Показываю сборку")
+
+@dp.callback_query(F.data == "ar:exit")
+async def cb_ar_exit(call: types.CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    patch_settings(call.from_user.id, artraccoon_mode=False, pending_prompt="", pending_original_prompt="", prompt_action="")
+    await call.message.edit_text("✅ ArtRaccoon режим выключен.", reply_markup=main_menu())
+    await call.answer()
+
+@dp.message(GenState.waiting_ar_base)
+async def ar_base_input(message: types.Message, state: FSMContext):
+    await state.clear()
+    patch_settings(message.from_user.id, artraccoon_base_prompt=(message.text or "").strip())
+    await message.answer("📜 Base Prompt сохранён.", reply_markup=artraccoon_menu())
+
+@dp.message(GenState.waiting_ar_base_uc)
+async def ar_base_uc_input(message: types.Message, state: FSMContext):
+    await state.clear()
+    patch_settings(message.from_user.id, artraccoon_base_uc=(message.text or "").strip())
+    await message.answer("🚫 Base UC сохранён.", reply_markup=artraccoon_menu())
+
+@dp.message(GenState.waiting_ar_char_neg)
+async def ar_char_neg_input(message: types.Message, state: FSMContext):
+    await state.clear()
+    patch_settings(message.from_user.id, artraccoon_character_negative=(message.text or "").strip())
+    await message.answer("👤 Негатив персонажа сохранён.", reply_markup=artraccoon_menu())
+
 @dp.message(GenState.waiting_prompt)
 async def gen_from_button(message: types.Message, state: FSMContext):
     prompt = message.text.strip() if message.text else ""
@@ -764,8 +919,7 @@ async def gen_from_button(message: types.Message, state: FSMContext):
         return
 
     await state.clear()
-    converted = natural_to_nai_tags(prompt)
-    original = "" if converted == prompt and looks_like_english_tags(prompt) else prompt
+    converted, original = prepare_prompt_for_user(message.from_user.id, prompt)
     patch_settings(message.from_user.id, pending_prompt=converted, pending_original_prompt=original, prompt_action="")
     await show_pending_prompt(message, message.from_user.id)
 
@@ -774,7 +928,7 @@ async def gen_from_button(message: types.Message, state: FSMContext):
 async def negative_cmd(message: types.Message):
     text = message.text.replace("/negative", "", 1).strip()
     patch_settings(message.from_user.id, negative_prompt=text)
-    await message.answer("🚫 Негативный промт обновлён.", reply_markup=settings_menu())
+    await message.answer("🚫 Негативный промт обновлён.", reply_markup=settings_markup_for(message.from_user.id))
 
 @dp.callback_query(F.data.startswith("set:model:"))
 async def set_model(call: types.CallbackQuery):
@@ -783,7 +937,7 @@ async def set_model(call: types.CallbackQuery):
         await call.answer("Неизвестная модель", show_alert=True)
         return
     patch_settings(call.from_user.id, model_name=name)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Модель обновлена")
 
 @dp.callback_query(F.data.startswith("set:size:"))
@@ -795,8 +949,19 @@ async def set_size(call: types.CallbackQuery):
         save_settings(call.from_user.id, s)
     elif name in RESOLUTIONS:
         w, h = RESOLUTIONS[name]
+        if not s.pro_mode and not s.artraccoon_mode and (w, h) not in SAFE_RESOLUTIONS:
+            w, h = 832, 1216
+            patch_settings(call.from_user.id, width=w, height=h)
+            await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
+            await call.answer("В обычном режиме доступны только безопасные размеры. Поставила 832x1216 🙂", show_alert=True)
+            return
         patch_settings(call.from_user.id, width=w, height=h)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    if not s.pro_mode and not s.artraccoon_mode and (get_settings(call.from_user.id).width, get_settings(call.from_user.id).height) not in SAFE_RESOLUTIONS:
+        patch_settings(call.from_user.id, width=832, height=1216)
+        await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
+        await call.answer("В обычном режиме доступны только безопасные размеры. Поставила 832x1216 🙂", show_alert=True)
+        return
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Размер обновлён")
 
 @dp.callback_query(F.data.startswith("set:sampler:"))
@@ -806,7 +971,7 @@ async def set_sampler(call: types.CallbackQuery):
         await call.answer("Неизвестный sampler", show_alert=True)
         return
     patch_settings(call.from_user.id, sampler=sampler)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Sampler обновлён")
 
 @dp.callback_query(F.data.startswith("set:uc:"))
@@ -816,7 +981,7 @@ async def set_uc(call: types.CallbackQuery):
         await call.answer("Неизвестный UC preset", show_alert=True)
         return
     patch_settings(call.from_user.id, uc_preset=uc)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("UC обновлён")
 
 @dp.callback_query(F.data.startswith("set:n:"))
@@ -824,32 +989,39 @@ async def set_n(call: types.CallbackQuery):
     val = int(call.data.split(":", 2)[2])
     if val > 1 and not get_settings(call.from_user.id).pro_mode:
         patch_settings(call.from_user.id, n_samples=1)
-        await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+        await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
         await call.answer(ANLAS_WARNING, show_alert=True)
         return
     patch_settings(call.from_user.id, n_samples=val)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Количество обновлено")
 
 @dp.callback_query(F.data.startswith("set:steps:"))
 async def set_steps(call: types.CallbackQuery):
     val = int(call.data.split(":", 2)[2])
+    s = get_settings(call.from_user.id)
+    if val > 28 and not s.pro_mode and not s.artraccoon_mode:
+        val = 28
+        patch_settings(call.from_user.id, steps=val)
+        await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
+        await call.answer("В обычном режиме максимум 28 шагов. Аккуратно поставила 28 🙂", show_alert=True)
+        return
     patch_settings(call.from_user.id, steps=val)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Steps обновлены")
 
 @dp.callback_query(F.data.startswith("set:scale:"))
 async def set_scale(call: types.CallbackQuery):
     val = float(call.data.split(":", 2)[2])
     patch_settings(call.from_user.id, scale=val)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Scale обновлён")
 
 @dp.callback_query(F.data.startswith("set:seed:"))
 async def set_seed(call: types.CallbackQuery):
     val = int(call.data.split(":", 2)[2])
     patch_settings(call.from_user.id, seed=val)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Seed обновлён")
 
 
@@ -861,7 +1033,7 @@ async def set_cfg(call: types.CallbackQuery):
         await call.answer("Некорректное значение", show_alert=True)
         return
     patch_settings(call.from_user.id, cfg_rescale=val)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("CFG rescale обновлён")
 
 @dp.callback_query(F.data.startswith("set:noise:"))
@@ -871,7 +1043,7 @@ async def set_noise(call: types.CallbackQuery):
         await call.answer("Неизвестный noise schedule", show_alert=True)
         return
     patch_settings(call.from_user.id, noise_schedule=val)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Noise schedule обновлён")
 
 @dp.callback_query(F.data.startswith("set:img2img:"))
@@ -883,7 +1055,7 @@ async def set_img2img(call: types.CallbackQuery):
         await call.answer("Некорректное значение", show_alert=True)
         return
     patch_settings(call.from_user.id, img2img_strength=strength, img2img_noise=noise)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("Img2Img обновлён")
 
 
@@ -894,10 +1066,12 @@ async def toggle_pro(call: types.CallbackQuery):
     updates = {"pro_mode": new_value}
     if not new_value:
         updates["n_samples"] = 1
+        if s.steps > 28:
+            updates["steps"] = 28
         if (s.width, s.height) not in SAFE_RESOLUTIONS:
             updates.update({"width": 832, "height": 1216})
     patch_settings(call.from_user.id, **updates)
-    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_menu(), parse_mode="HTML")
+    await call.message.edit_text(settings_text(call.from_user.id), reply_markup=settings_markup_for(call.from_user.id), parse_mode="HTML")
     await call.answer("PRO / Анласы включены" if new_value else "Экономный режим включён")
 
 @dp.callback_query(F.data == "toggle:furry")
@@ -936,12 +1110,11 @@ async def plain_text_prompt(message: types.Message):
     s = get_settings(message.from_user.id)
     if s.prompt_action == "append" and s.pending_prompt.strip():
         original = f"{(s.pending_original_prompt or s.pending_prompt).strip()}, {text}"
-        prompt = natural_to_nai_tags(original)
-        patch_settings(message.from_user.id, pending_prompt=prompt, pending_original_prompt=original, prompt_action="")
+        prompt, stored_original = prepare_prompt_for_user(message.from_user.id, original)
+        patch_settings(message.from_user.id, pending_prompt=prompt, pending_original_prompt=stored_original, prompt_action="")
         await message.answer("✏️ Добавила текст к черновику.")
     else:
-        converted = natural_to_nai_tags(text)
-        original = "" if converted == text and looks_like_english_tags(text) else text
+        converted, original = prepare_prompt_for_user(message.from_user.id, text)
         patch_settings(message.from_user.id, pending_prompt=converted, pending_original_prompt=original, prompt_action="")
         if s.prompt_action == "replace":
             await message.answer("🔁 Заменила черновик новым промтом.")
