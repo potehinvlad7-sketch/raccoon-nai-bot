@@ -12,10 +12,10 @@ from aiogram.types import BufferedInputFile
 from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 
-from config_defaults import RESOLUTIONS
+from config_defaults import QUICK_PRESETS, RESOLUTIONS
 from keyboards import (
     main_menu, settings_menu, model_menu, size_menu, sampler_menu,
-    uc_menu, numeric_menu, modes_menu
+    uc_menu, numeric_menu, modes_menu, presets_menu
 )
 from app.services.nai_client import NovelAIClient, NovelAIError
 from storage import get_settings, save_settings, patch_settings
@@ -60,12 +60,64 @@ def settings_text(user_id: int) -> str:
         f"Quality tags: <code>{s.add_quality_tags}</code>"
     )
 
+def presets_text() -> str:
+    lines = [
+        "⚡ <b>Быстрые пресеты</b>",
+        "",
+        "▶️ — сразу сгенерировать.",
+        "✍️ — показать промт, чтобы скопировать или дописать.",
+        "",
+        "Доступные идеи:",
+    ]
+    for preset in QUICK_PRESETS.values():
+        lines.append(f"• <b>{preset['title']}</b>")
+    return "\n".join(lines)
+
+async def send_last_prompt(message: types.Message, actor: types.User | None = None) -> None:
+    user = actor or message.from_user
+    if user is None:
+        await message.answer("Не вижу пользователя. Попробуй ещё раз.")
+        return
+    s = get_settings(user.id)
+    if not s.last_prompt:
+        await message.answer(
+            "📝 У тебя пока нет последнего промта. Нажми 🎨 Новый промт или выбери ⚡ пресет.",
+            reply_markup=main_menu(),
+        )
+        return
+    await message.answer(
+        "📝 <b>Последний промт</b>\n"
+        f"<code>{html.escape(s.last_prompt)}</code>\n\n"
+        f"🎲 Seed: <code>{s.seed}</code>\n"
+        "Чтобы повторить генерацию, нажми /retry.",
+        parse_mode="HTML",
+        reply_markup=main_menu(),
+    )
+
+async def retry_last_prompt(message: types.Message, actor: types.User | None = None) -> None:
+    user = actor or message.from_user
+    if user is None:
+        await message.answer("Не вижу пользователя. Попробуй ещё раз.")
+        return
+    s = get_settings(user.id)
+    if not s.last_prompt:
+        await message.answer(
+            "🔁 Повторить пока нечего 😅 Сначала сгенерируй картинку через /gen или пресет.",
+            reply_markup=main_menu(),
+        )
+        return
+    await message.answer("🔁 Повторяю последний промт с текущими настройками.")
+    await generate_image_from_prompt(message, s.last_prompt, actor=user)
+
 @dp.message(Command("start"))
 async def start(message: types.Message):
     get_settings(message.from_user.id)
     await message.answer(
         "🦝 <b>NovelAI bot</b>\n\n"
-        "Нажми 🎨 <b>Генерация</b>, отправь промт обычным сообщением — и я сделаю картинку.\n\n"
+        "Привет! Я помогу быстро сделать картинку в NovelAI.\n\n"
+        "• 🎨 <b>Новый промт</b> — напиши идею своими словами\n"
+        "• ⚡ <b>Быстрые пресеты</b> — готовые идеи в один тап\n"
+        "• 🔁 <b>Повторить</b> — перегенерировать последний промт\n\n"
         "Команда тоже работает:\n"
         "<code>/gen raccoon girl, pink eyes, sketch, ruins</code>\n"
         "<code>/draw raccoon girl, pink eyes, sketch, ruins</code>",
@@ -80,6 +132,10 @@ async def help_cmd(message: types.Message):
         "/gen prompt — сгенерировать\n"
         "/draw prompt — сгенерировать\n"
         "/settings — настройки\n"
+        "/presets — быстрые пресеты\n"
+        "/last_prompt — показать последний промт\n"
+        "/retry — повторить последний промт\n"
+        "/seed random или /seed 123456 — задать seed\n"
         "/raw — показать настройки\n"
         "/nai_debug — показать модель и параметры NovelAI\n"
         "/cancel — отменить ввод промта\n\n"
@@ -151,8 +207,12 @@ async def notify_admins_about_prompt(message: types.Message, prompt: str) -> Non
             log.exception("Failed to notify admin %s", admin_id)
 
 
-async def generate_image_from_prompt(message: types.Message, prompt: str) -> None:
-    user = message.from_user
+async def generate_image_from_prompt(
+    message: types.Message,
+    prompt: str,
+    actor: types.User | None = None,
+) -> None:
+    user = actor or message.from_user
     if user is None:
         await message.answer("Не вижу пользователя. Попробуй ещё раз.")
         return
@@ -162,9 +222,10 @@ async def generate_image_from_prompt(message: types.Message, prompt: str) -> Non
         await message.answer("⛔ Генерация доступна только администраторам.", reply_markup=main_menu())
         return
 
-    s = get_settings(user_id)
+    s = patch_settings(user_id, last_prompt=prompt)
 
-    await notify_admins_about_prompt(message, prompt)
+    if actor is None:
+        await notify_admins_about_prompt(message, prompt)
 
     wait = await message.answer("🎨 Генерирую...")
 
@@ -183,7 +244,7 @@ async def generate_image_from_prompt(message: types.Message, prompt: str) -> Non
         for idx, img in enumerate(images, start=1):
             name = f"novelai_{idx}.png"
             image = BufferedInputFile(img, filename=name)
-            caption = f"✅ <b>Готово</b>\\n<code>{prompt[:900]}</code>"
+            caption = f"✅ <b>Готово</b>\\n<code>{html.escape(prompt[:900])}</code>"
             try:
                 await message.answer_photo(
                     image,
@@ -226,6 +287,43 @@ async def gen_cmd(message: types.Message):
 
     await generate_image_from_prompt(message, prompt)
 
+@dp.message(Command("presets"))
+async def presets_cmd(message: types.Message):
+    await message.answer(presets_text(), reply_markup=presets_menu(), parse_mode="HTML")
+
+
+@dp.message(Command("last_prompt"))
+async def last_prompt_cmd(message: types.Message):
+    await send_last_prompt(message)
+
+
+@dp.message(Command("retry"))
+async def retry_cmd(message: types.Message):
+    await retry_last_prompt(message)
+
+
+@dp.message(Command("seed"))
+async def seed_cmd(message: types.Message):
+    value = message.text.replace("/seed", "", 1).strip() if message.text else ""
+    if not value:
+        await message.answer("🎲 Напиши <code>/seed random</code> или <code>/seed 123456</code>.", parse_mode="HTML", reply_markup=main_menu())
+        return
+    if value.lower() == "random":
+        patch_settings(message.from_user.id, seed=-1)
+        await message.answer("🎲 Seed переключён в random. Каждый раз будет новый результат.", reply_markup=main_menu())
+        return
+    try:
+        seed = int(value)
+    except ValueError:
+        await message.answer("Не поняла seed 😅 Используй число, например <code>/seed 123456</code>, или <code>/seed random</code>.", parse_mode="HTML", reply_markup=main_menu())
+        return
+    if seed < 0 or seed > 4294967295:
+        await message.answer("Seed должен быть от 0 до 4294967295. Для случайного seed напиши <code>/seed random</code>.", parse_mode="HTML", reply_markup=main_menu())
+        return
+    patch_settings(message.from_user.id, seed=seed)
+    await message.answer(f"🎯 Seed сохранён: <code>{seed}</code>. Теперь /retry повторит промт с этим seed.", parse_mode="HTML", reply_markup=main_menu())
+
+
 @dp.message(Command("draw"))
 async def draw_cmd(message: types.Message):
     prompt = message.text.replace("/draw", "", 1).strip() if message.text else ""
@@ -241,7 +339,12 @@ async def draw_cmd(message: types.Message):
 
 @dp.callback_query(F.data == "menu:main")
 async def cb_main(call: types.CallbackQuery):
-    await call.message.edit_text("🦝 Главное меню", reply_markup=main_menu())
+    await call.message.edit_text(
+        "🦝 <b>Главное меню</b>\n\n"
+        "Выбери действие: новый промт, быстрый пресет, повтор последней генерации или настройки.",
+        reply_markup=main_menu(),
+        parse_mode="HTML",
+    )
     await call.answer()
 
 @dp.callback_query(F.data == "menu:settings")
@@ -267,10 +370,14 @@ async def cb_gen(call: types.CallbackQuery, state: FSMContext):
 async def cb_help(call: types.CallbackQuery):
     await call.message.edit_text(
         "❔ <b>Помощь</b>\n\n"
-        "• /gen prompt — генерация\n"
+        "• /gen prompt и /draw prompt — генерация\n"
+        "• /presets — готовые промты\n"
+        "• /last_prompt — показать последний промт\n"
+        "• /retry — повторить последний промт\n"
+        "• /seed random или /seed 123456 — seed\n"
         "• /settings — меню настроек\n"
         "• reply на фото + /gen prompt — img2img\n\n"
-        "Inpaint/Vibe Transfer/Character prompts лучше добавлять следующим слоем, чтобы не превратить старт в болото.",
+        "Подсказка: если результат почти понравился, задай фиксированный seed и меняй промт маленькими шагами.",
         reply_markup=main_menu(),
         parse_mode="HTML",
     )
@@ -291,12 +398,47 @@ async def cb_img2img(call: types.CallbackQuery):
 
 @dp.callback_query(F.data == "menu:presets")
 async def cb_presets(call: types.CallbackQuery):
-    await call.message.edit_text(
-        "🧪 Пресеты будут следующим слоем: ArtRaccoon, botanical, bestiary, pixel, blueprint, macro.\n"
-        "База уже готова, их можно хранить как готовые промт-шаблоны.",
-        reply_markup=main_menu(),
-    )
+    await call.message.edit_text(presets_text(), reply_markup=presets_menu(), parse_mode="HTML")
     await call.answer()
+
+@dp.callback_query(F.data.startswith("preset:show:"))
+async def cb_preset_show(call: types.CallbackQuery):
+    key = call.data.split(":", 2)[2]
+    preset = QUICK_PRESETS.get(key)
+    if not preset:
+        await call.answer("Пресет не найден", show_alert=True)
+        return
+    prompt = preset["prompt"]
+    patch_settings(call.from_user.id, last_prompt=prompt)
+    await call.message.edit_text(
+        f"✍️ <b>{preset['title']}</b>\n\n"
+        f"<code>{html.escape(prompt)}</code>\n\n"
+        "Скопируй промт, допиши детали и отправь через /gen — или нажми ▶️ в меню пресетов.",
+        reply_markup=presets_menu(),
+        parse_mode="HTML",
+    )
+    await call.answer("Промт показан")
+
+@dp.callback_query(F.data.startswith("preset:gen:"))
+async def cb_preset_gen(call: types.CallbackQuery):
+    key = call.data.split(":", 2)[2]
+    preset = QUICK_PRESETS.get(key)
+    if not preset:
+        await call.answer("Пресет не найден", show_alert=True)
+        return
+    await call.answer("Запускаю генерацию")
+    await call.message.answer(f"⚡ Генерирую пресет: <b>{preset['title']}</b>", parse_mode="HTML")
+    await generate_image_from_prompt(call.message, preset["prompt"], actor=call.from_user)
+
+@dp.callback_query(F.data == "quick:last_prompt")
+async def cb_last_prompt(call: types.CallbackQuery):
+    await send_last_prompt(call.message, actor=call.from_user)
+    await call.answer()
+
+@dp.callback_query(F.data == "quick:retry")
+async def cb_retry(call: types.CallbackQuery):
+    await call.answer("Повторяю")
+    await retry_last_prompt(call.message, actor=call.from_user)
 
 @dp.callback_query(F.data == "settings:model")
 async def cb_model(call: types.CallbackQuery):
