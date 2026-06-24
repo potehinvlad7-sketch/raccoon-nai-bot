@@ -74,6 +74,7 @@ class UserSettings:
     scale: float = 4.0
     sampler: str = "k_euler_ancestral"
     n_samples: int = 1
+    pro_mode: bool = False
     seed: int = -1
     uc_preset: str = "v4.5_full_heavy"
     negative_prompt: str = ""
@@ -82,6 +83,7 @@ class UserSettings:
     add_quality_tags: bool = True
     last_prompt: str = ""
     pending_prompt: str = ""
+    pending_original_prompt: str = ""
     last_image_path: str = ""
     pending_image_path: str = ""
     img2img_strength: float = 0.55
