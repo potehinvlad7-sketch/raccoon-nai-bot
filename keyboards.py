@@ -175,7 +175,7 @@ def meta_import_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📥 Взять как Base Prompt", callback_data="meta:base"),
         InlineKeyboardButton(text="👤 Взять как Character Prompt", callback_data="meta:character"),
         InlineKeyboardButton(text="🚫 Взять UC/негатив", callback_data="meta:negative"),
-        InlineKeyboardButton(text="⚙️ Взять настройки сайта", callback_data="meta:settings"),
+        InlineKeyboardButton(text="⚙️ Применить все настройки сайта", callback_data="meta:settings"),
         InlineKeyboardButton(text="📋 Показать настройки metadata", callback_data="meta:show_settings"),
         InlineKeyboardButton(text="📦 Взять всё", callback_data="meta:all"),
         main_menu_button(),

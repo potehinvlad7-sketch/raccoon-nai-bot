@@ -158,9 +158,17 @@ def parse_nai_metadata(data: bytes) -> dict:
         "scale": ["scale", "guidance"],
         "seed": ["seed"],
         "sampler": ["sampler"],
+        "ucPreset": ["ucPreset", "uc_preset"],
         "uc_preset": ["ucPreset", "uc_preset"],
         "noise_schedule": ["noise_schedule", "noiseSchedule"],
         "cfg_rescale": ["cfg_rescale", "cfgRescale"],
+        "qualityToggle": ["qualityToggle", "quality_toggle"],
+        "variety_plus": ["variety_plus", "varietyPlus"],
+        "dynamic_thresholding": ["dynamic_thresholding", "dynamicThresholding"],
+        "n_samples": ["n_samples", "nSamples"],
+        "params_version": ["params_version", "paramsVersion"],
+        "v4_prompt": ["v4_prompt"],
+        "v4_negative_prompt": ["v4_negative_prompt"],
     }
     meta = {}
     for target, keys in aliases.items():
@@ -238,12 +246,103 @@ def metadata_summary(meta: dict) -> str:
 def metadata_settings_summary(meta: dict) -> str:
     if not meta:
         return "📭 Metadata settings не найдены."
-    keys = ["model", "width", "height", "steps", "scale", "cfg_rescale", "sampler", "noise_schedule", "seed", "uc_preset", "negative_prompt"]
+    keys = ["model", "width", "height", "steps", "scale", "cfg_rescale", "sampler", "noise_schedule", "seed", "ucPreset", "uc_preset", "qualityToggle", "variety_plus", "n_samples", "params_version", "negative_prompt"]
     lines = ["📋 <b>Настройки metadata</b>"]
     for key in keys:
         if key in meta:
             lines.append(f"<b>{html.escape(key)}:</b> <code>{html.escape(str(meta[key])[:900])}</code>")
     return "\n".join(lines)
+
+
+COMPARE_FIELDS = [
+    "model", "width", "height", "steps", "scale", "cfg_rescale", "sampler",
+    "noise_schedule", "seed", "ucPreset", "qualityToggle", "variety_plus",
+    "dynamic_thresholding", "n_samples", "params_version",
+    "v4_prompt.use_order", "v4_prompt.use_coords",
+    "v4_negative_prompt.use_order", "v4_negative_prompt.use_coords",
+    "v4_negative_prompt.legacy_uc",
+]
+
+_METADATA_ALIASES = {
+    "ucPreset": ("ucPreset", "uc_preset"),
+    "qualityToggle": ("qualityToggle", "quality_toggle"),
+}
+
+
+def _nested_get(data: dict, dotted: str):
+    current = data
+    for part in dotted.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _payload_compare_value(payload: dict, field: str):
+    if field == "model":
+        return payload.get("model")
+    parameters = payload.get("parameters", {}) if isinstance(payload, dict) else {}
+    return _nested_get(parameters, field)
+
+
+def _metadata_compare_value(meta: dict, field: str):
+    for key in _METADATA_ALIASES.get(field, (field,)):
+        if "." in key:
+            value = _nested_get(meta, key)
+        else:
+            value = meta.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _norm_compare_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def _compare_status(site_value, bot_value) -> str:
+    if site_value is None and bot_value is None:
+        return "—"
+    if site_value is None or bot_value is None:
+        return "❌"
+    return "✅" if _norm_compare_value(site_value) == _norm_compare_value(bot_value) else "❌"
+
+
+def _format_compare_value(value) -> str:
+    if value is None:
+        return "—"
+    text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+    if len(text) > 80:
+        text = text[:77] + "…"
+    return text
+
+
+def nai_compare_summary_text(meta: dict, payload: dict) -> str:
+    rows = ["field | website metadata | bot payload | status"]
+    for field in COMPARE_FIELDS:
+        site_value = _metadata_compare_value(meta, field)
+        bot_value = _payload_compare_value(payload, field)
+        rows.append(
+            f"{field} | {_format_compare_value(site_value)} | {_format_compare_value(bot_value)} | {_compare_status(site_value, bot_value)}"
+        )
+    return (
+        "⚖️ <b>NovelAI website-vs-bot payload compare</b>\n"
+        + "<pre>"
+        + html.escape("\n".join(rows))
+        + "</pre>"
+    )
 
 def nai_payload_summary_text(payload: dict, settings) -> str:
     summary = payload_summary(payload, settings)
@@ -752,6 +851,23 @@ async def nai_payload_cmd(message: types.Message):
     s = get_settings(message.from_user.id)
     payload = get_last_payload(message.from_user.id) or sanitize_payload(nai.build_payload(s.last_prompt or "debug prompt", s))
     await message.answer(nai_payload_summary_text(payload, s), parse_mode="HTML")
+
+
+
+@dp.message(Command("nai_compare"))
+async def nai_compare_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    meta = get_last_metadata(message.from_user.id)
+    payload = sanitize_payload(get_last_payload(message.from_user.id))
+    if not meta:
+        await message.answer("📭 Last NovelAI metadata не сохранена. Ответь /meta на файл с metadata NovelAI.")
+        return
+    if not payload:
+        await message.answer("📭 Last bot payload не сохранён. Сгенерируй изображение или используй /nai_payload для preview.")
+        return
+    await message.answer(nai_compare_summary_text(meta, payload), parse_mode="HTML")
 
 
 @dp.message(Command("nai_payload_full"))
@@ -1523,6 +1639,16 @@ def metadata_settings_updates(meta: dict) -> dict:
         updates["uc_preset"] = str(meta["uc_preset"])
     if str(meta.get("noise_schedule", "")) in NOISE_SCHEDULES:
         updates["noise_schedule"] = str(meta["noise_schedule"])
+    for key, target, cast in [
+        ("qualityToggle", "add_quality_tags", lambda value: str(value).strip().lower() == "true" if isinstance(value, str) else bool(value)),
+        ("variety_plus", "variety_plus", lambda value: str(value).strip().lower() == "true" if isinstance(value, str) else bool(value)),
+        ("n_samples", "n_samples", int),
+    ]:
+        if key in meta:
+            try:
+                updates[target] = cast(meta[key])
+            except (ValueError, TypeError):
+                pass
     for name, value in MODELS.items():
         if meta.get("model") in (name, value):
             updates["model_name"] = name
