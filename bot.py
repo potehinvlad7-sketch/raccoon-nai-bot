@@ -4,10 +4,9 @@ import os
 import html
 import json
 import re
-import struct
 from io import BytesIO
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -17,17 +16,17 @@ from aiogram.types import BufferedInputFile, FSInputFile
 from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 
-from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES, UserSettings, AELITA_DESCRIPTION
+from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES, AELITA_DESCRIPTION
 from keyboards import (
     main_menu as base_main_menu, settings_menu, modes_menu, presets_menu, pending_prompt_menu,
     after_generation_menu, generation_item_menu, artraccoon_menu, meta_import_menu, confirm_reset_menu, model_menu, size_menu, sampler_menu, uc_menu, noise_menu, seed_menu, samples_menu, moderation_dictionary_menu, dictionary_menu, dictionary_pending_menu
 )
 from app.services.nai_client import (
-    NovelAIClient, NovelAIError, payload_summary, sanitize_payload,
+    NovelAIClient, NovelAIError, sanitize_payload,
     SITE_MODE_STEPS, SITE_MODE_SCALE, SITE_MODE_CFG_RESCALE, SITE_MODE_SAMPLER, SITE_MODE_NOISE_SCHEDULE,
 )
 from prompt_tools import (
-    DICTIONARY_PATH, add_learned_mapping, has_unknown_russian, learn_from_english_prompt,
+    DICTIONARY_PATH, add_learned_mapping, learn_from_english_prompt,
     load_learned_dictionary, natural_to_nai_tags, parse_english_tags, reject_tags,
     looks_like_english_tags, save_learned_dictionary
 )
@@ -36,6 +35,17 @@ from storage import (
     add_favorite, get_favorites, delete_favorite, set_last_metadata, get_last_metadata,
     set_last_payload, get_last_payload
 )
+
+from services.generation import (
+    DAILY_GENERATION_LIMIT, GENERATION_TIMEOUT_SECONDS, SAFE_RESOLUTIONS, apply_anlas_safe_defaults as _apply_anlas_safe_defaults,
+    ar_payload_mode as _ar_payload_mode, artraccoon_prompt_defaults, assemble_ar_prompt, cooldown_remaining as _cooldown_remaining,
+    mark_generation_started as _mark_generation_started, remaining_generations as _remaining_generations,
+    safe_existing_generated_path, safe_generation_defaults, save_generated_images,
+)
+from services.metadata import (
+    metadata_settings_summary, metadata_summary, nai_compare_summary_text, parse_nai_metadata,
+)
+from ui.texts import nai_payload_summary_text, presets_text, prompt_preview_text
 
 load_dotenv()
 
@@ -58,6 +68,26 @@ bot: Bot | None = None
 dp = Dispatcher()
 nai = NovelAIClient(NOVELAI_TOKEN, default_model=NAI_MODEL, proxy_url=PROXY_URL)
 
+
+def ar_payload_mode(s) -> str:
+    return _ar_payload_mode(s, NAI_MODEL)
+
+
+def remaining_generations(user_id: int) -> int | None:
+    return _remaining_generations(user_id, ADMIN_IDS)
+
+
+def mark_generation_started(user_id: int) -> None:
+    _mark_generation_started(user_id, ADMIN_IDS)
+
+
+def cooldown_remaining(user_id: int) -> int:
+    return _cooldown_remaining(user_id, ADMIN_IDS)
+
+
+def apply_anlas_safe_defaults(user_id: int):
+    return _apply_anlas_safe_defaults(user_id, ADMIN_IDS)
+
 class GenState(StatesGroup):
     waiting_prompt = State()
     waiting_ar_base = State()
@@ -68,20 +98,10 @@ class GenState(StatesGroup):
     waiting_dict_tags = State()
     waiting_dict_review_ru = State()
 
-TMP_DIR = Path("data/tmp_images")
-TMP_DIR.mkdir(parents=True, exist_ok=True)
-GENERATED_DIR = Path("data/generated")
-GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-# TODO: add safe generated-image cleanup by age and total storage size when retention policy is defined.
-
 def main_menu():
     return base_main_menu(CHANNEL_URL)
 
-SAFE_RESOLUTIONS = {(512, 768), (768, 1344), (832, 1216), (1024, 1024), (1216, 832)}
 ANLAS_WARNING = "💎 Эта функция временно отключена."
-DAILY_GENERATION_LIMIT = 10
-NON_ADMIN_COOLDOWN_SECONDS = 60
-GENERATION_TIMEOUT_SECONDS = 180
 generation_lock = asyncio.Lock()
 generation_waiting = 0
 moderation_candidates: dict[str, list[str]] = {}
@@ -100,256 +120,6 @@ SETTING_PROMPTS = {
     "img2img": "📎 Пришли силу Img2Img в формате <code>0.55/0.10</code>.",
 }
 
-def assemble_ar_prompt(s, character_prompt: str) -> str:
-    return ", ".join(part.strip() for part in [s.artraccoon_base_prompt, character_prompt] if part.strip())
-
-def ar_payload_mode(s) -> str:
-    if s.artraccoon_force_concat:
-        return "fallback concat (forced)"
-    model = NAI_MODEL or MODELS.get(s.model_name, "")
-    return "Character Payload for v4/v4.5" if model.startswith(("nai-diffusion-4", "nai-diffusion-4-5")) else "fallback concat"
-
-def parse_nai_metadata(data: bytes) -> dict:
-    texts = []
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        pos = 8
-        while pos + 8 <= len(data):
-            length = struct.unpack(">I", data[pos:pos + 4])[0]
-            kind = data[pos + 4:pos + 8]
-            chunk = data[pos + 8:pos + 8 + length]
-            if kind in {b"tEXt", b"iTXt", b"zTXt"}:
-                texts.append(chunk.decode("utf-8", "ignore"))
-            pos += 12 + length
-    texts.append(data[:2_000_000].decode("utf-8", "ignore"))
-    blob = "\n".join(t for t in texts if t)
-    found = {}
-    candidates = []
-    for start, ch in enumerate(blob):
-        if ch != "{":
-            continue
-        depth = 0
-        for pos in range(start, min(len(blob), start + 200_000)):
-            if blob[pos] == "{":
-                depth += 1
-            elif blob[pos] == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = blob[start:pos + 1]
-                    if re.search(r"prompt|uc|sampler|seed|steps|scale|width|height", candidate, re.I):
-                        candidates.append(candidate)
-                    break
-    for candidate in candidates:
-        try:
-            obj = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            found.update(obj)
-            params = obj.get("parameters")
-            if isinstance(params, dict):
-                found.update(params)
-    aliases = {
-        "prompt": ["prompt", "Description"],
-        "negative_prompt": ["negative_prompt", "negative prompt", "uc", "Undesired Content"],
-        "model": ["model", "Model"],
-        "width": ["width"],
-        "height": ["height"],
-        "steps": ["steps"],
-        "scale": ["scale", "guidance"],
-        "seed": ["seed"],
-        "sampler": ["sampler"],
-        "ucPreset": ["ucPreset", "uc_preset"],
-        "uc_preset": ["ucPreset", "uc_preset"],
-        "noise_schedule": ["noise_schedule", "noiseSchedule"],
-        "cfg_rescale": ["cfg_rescale", "cfgRescale"],
-        "qualityToggle": ["qualityToggle", "quality_toggle"],
-        "variety_plus": ["variety_plus", "varietyPlus"],
-        "dynamic_thresholding": ["dynamic_thresholding", "dynamicThresholding"],
-        "n_samples": ["n_samples", "nSamples"],
-        "params_version": ["params_version", "paramsVersion"],
-        "v4_prompt": ["v4_prompt"],
-        "v4_negative_prompt": ["v4_negative_prompt"],
-    }
-    meta = {}
-    for target, keys in aliases.items():
-        for key in keys:
-            if key in found and found[key] not in ("", None):
-                meta[target] = found[key]
-                break
-    for target, pattern in {
-        "prompt": r"(?:prompt|description)[:=]\s*([^\n\r]+)",
-        "negative_prompt": r"(?:negative prompt|uc|undesired content)[:=]\s*([^\n\r]+)",
-        "model": r"model[:=]\s*([^\n\r,]+)",
-        "sampler": r"sampler[:=]\s*([^\n\r,]+)",
-    }.items():
-        if target not in meta:
-            m = re.search(pattern, blob, re.I)
-            if m:
-                meta[target] = m.group(1).strip()
-    for target, pattern in {
-        "width": r"width[:=]\s*(\d+)",
-        "height": r"height[:=]\s*(\d+)",
-        "steps": r"steps[:=]\s*(\d+)",
-        "scale": r"(?:scale|guidance)[:=]\s*([0-9.]+)",
-        "cfg_rescale": r"(?:cfg_rescale|cfg rescale)[:=]\s*([0-9.]+)",
-        "seed": r"seed[:=]\s*(\d+)",
-    }.items():
-        if target not in meta:
-            m = re.search(pattern, blob, re.I)
-            if m:
-                meta[target] = m.group(1)
-    return meta
-
-def _safe_generated_image_path(user_id: int, timestamp: str, idx: int) -> Path:
-    safe_timestamp = re.sub(r"[^0-9A-Za-z_.-]+", "_", timestamp)
-    filename = f"{int(user_id)}_{safe_timestamp}_{int(idx)}.png"
-    path = GENERATED_DIR / filename
-    resolved_dir = GENERATED_DIR.resolve()
-    resolved_path = path.resolve()
-    if resolved_dir not in resolved_path.parents:
-        raise ValueError("Unsafe generated image path")
-    return path
-
-def _save_generated_images(user_id: int, timestamp: str, images: list[bytes]) -> list[dict]:
-    saved = []
-    for idx, img in enumerate(images, start=1):
-        path = _safe_generated_image_path(user_id, timestamp, idx)
-        path.write_bytes(img)
-        saved.append({"path": path.as_posix(), "filename": f"novelai_{idx}.png", "index": idx})
-    return saved
-
-def _safe_existing_generated_path(raw_path: str) -> Path | None:
-    if not raw_path:
-        return None
-    path = Path(raw_path)
-    if path.is_absolute() or ".." in path.parts:
-        return None
-    try:
-        resolved_path = path.resolve()
-        resolved_dir = GENERATED_DIR.resolve()
-    except OSError:
-        return None
-    if resolved_dir not in resolved_path.parents:
-        return None
-    return path if path.exists() and path.is_file() else None
-
-def metadata_summary(meta: dict) -> str:
-    if not meta:
-        return "📭 NovelAI metadata не найдена. Можно попробовать отправить оригинальный PNG/WebP/JPEG как файл."
-    labels = {"prompt": "Prompt", "negative_prompt": "UC/негатив", "model": "Model", "width": "Width", "height": "Height", "steps": "Steps", "scale": "Guidance", "cfg_rescale": "CFG rescale", "seed": "Seed", "sampler": "Sampler", "uc_preset": "UC preset", "noise_schedule": "Noise"}
-    lines = ["📦 <b>Нашла metadata</b>"]
-    for key, label in labels.items():
-        if key in meta:
-            lines.append(f"<b>{label}:</b> <code>{html.escape(str(meta[key])[:900])}</code>")
-    return "\n".join(lines)
-
-def metadata_settings_summary(meta: dict) -> str:
-    if not meta:
-        return "📭 Metadata settings не найдены."
-    keys = ["model", "width", "height", "steps", "scale", "cfg_rescale", "sampler", "noise_schedule", "seed", "ucPreset", "uc_preset", "qualityToggle", "variety_plus", "n_samples", "params_version", "negative_prompt"]
-    lines = ["📋 <b>Настройки metadata</b>"]
-    for key in keys:
-        if key in meta:
-            lines.append(f"<b>{html.escape(key)}:</b> <code>{html.escape(str(meta[key])[:900])}</code>")
-    return "\n".join(lines)
-
-
-COMPARE_FIELDS = [
-    "model", "width", "height", "steps", "scale", "cfg_rescale", "sampler",
-    "noise_schedule", "seed", "ucPreset", "qualityToggle", "variety_plus",
-    "dynamic_thresholding", "n_samples", "params_version",
-    "v4_prompt.use_order", "v4_prompt.use_coords",
-    "v4_negative_prompt.use_order", "v4_negative_prompt.use_coords",
-    "v4_negative_prompt.legacy_uc",
-]
-
-_METADATA_ALIASES = {
-    "ucPreset": ("ucPreset", "uc_preset"),
-    "qualityToggle": ("qualityToggle", "quality_toggle"),
-}
-
-
-def _nested_get(data: dict, dotted: str):
-    current = data
-    for part in dotted.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
-    return current
-
-
-def _payload_compare_value(payload: dict, field: str):
-    if field == "model":
-        return payload.get("model")
-    parameters = payload.get("parameters", {}) if isinstance(payload, dict) else {}
-    return _nested_get(parameters, field)
-
-
-def _metadata_compare_value(meta: dict, field: str):
-    for key in _METADATA_ALIASES.get(field, (field,)):
-        if "." in key:
-            value = _nested_get(meta, key)
-        else:
-            value = meta.get(key)
-        if value is not None:
-            return value
-    return None
-
-
-def _norm_compare_value(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return float(value)
-    if value is None:
-        return None
-    text = str(value).strip()
-    if text.lower() in {"true", "false"}:
-        return text.lower() == "true"
-    try:
-        return float(text)
-    except ValueError:
-        return text
-
-
-def _compare_status(site_value, bot_value) -> str:
-    if site_value is None and bot_value is None:
-        return "—"
-    if site_value is None or bot_value is None:
-        return "❌"
-    return "✅" if _norm_compare_value(site_value) == _norm_compare_value(bot_value) else "❌"
-
-
-def _format_compare_value(value) -> str:
-    if value is None:
-        return "—"
-    text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
-    if len(text) > 80:
-        text = text[:77] + "…"
-    return text
-
-
-def nai_compare_summary_text(meta: dict, payload: dict) -> str:
-    rows = ["field | website metadata | bot payload | status"]
-    for field in COMPARE_FIELDS:
-        site_value = _metadata_compare_value(meta, field)
-        bot_value = _payload_compare_value(payload, field)
-        rows.append(
-            f"{field} | {_format_compare_value(site_value)} | {_format_compare_value(bot_value)} | {_compare_status(site_value, bot_value)}"
-        )
-    return (
-        "⚖️ <b>NovelAI website-vs-bot payload compare</b>\n"
-        + "<pre>"
-        + html.escape("\n".join(rows))
-        + "</pre>"
-    )
-
-def nai_payload_summary_text(payload: dict, settings) -> str:
-    summary = payload_summary(payload, settings)
-    lines = ["🧪 <b>NovelAI payload summary</b>"]
-    for key, value in summary.items():
-        lines.append(f"<b>{html.escape(str(key))}:</b> <code>{html.escape(str(value))[:1200]}</code>")
-    return "\n".join(lines)
 
 def art_prompt_preview_text(s) -> str:
     character = s.artraccoon_character_prompt or s.pending_original_prompt or s.pending_prompt
@@ -363,119 +133,6 @@ def art_prompt_preview_text(s) -> str:
         f"<b>Mode:</b> <code>{ar_payload_mode(s)}</code>"
     )
 
-def generation_settings_summary(s) -> str:
-    negative = (s.negative_prompt or "").strip()
-    negative = "empty" if not negative else html.escape(negative[:120])
-    seed = "random" if s.seed == -1 else str(s.seed)
-    return (
-        f"📐 Размер: <code>{s.width}x{s.height}</code>\n"
-        f"👣 Шаги: <code>{s.steps}</code>\n"
-        f"🧲 CFG: <code>{s.scale}</code>\n"
-        f"🎲 Seed: <code>{seed}</code>\n"
-        f"🚫 Негатив: <code>{negative}</code>\n"
-        f"🧠 Модель: <code>{html.escape(s.model_name)}</code>"
-    )
-
-def prompt_preview_text(prompt: str, original: str = "", settings=None, remaining: int | None = None) -> str:
-    remaining_line = f"\n\nСегодня осталось: {remaining}/{DAILY_GENERATION_LIMIT}" if remaining is not None else ""
-    warning_line = "\n\n⚠️ Проверь перевод." if original and has_unknown_russian(original) else ""
-    if original and original.strip() and original.strip() != prompt.strip():
-        return (
-            "📝 <b>Промт готов. Запускаем?</b>\n\n"
-            "<b>Исходник:</b>\n"
-            f"<code>{html.escape(original[:1400])}</code>\n\n"
-            "<b>Теговый промт:</b>\n"
-            f"<code>{html.escape(prompt[:3000])}</code>"
-            + warning_line
-            + ("\n\n" + generation_settings_summary(settings) if settings else "")
-            + remaining_line
-        )
-    return (
-        "📝 <b>Промт готов. Запускаем?</b>\n\n"
-        f"<code>{html.escape(prompt[:3000])}</code>"
-        + warning_line
-        + ("\n\n" + generation_settings_summary(settings) if settings else "")
-        + remaining_line
-    )
-
-def apply_anlas_safe_defaults(user_id: int):
-    s = get_settings(user_id)
-    if s.pro_mode and user_id in ADMIN_IDS:
-        return s
-    updates = {}
-    if s.n_samples != 1:
-        updates["n_samples"] = 1
-    if s.steps > 28:
-        updates["steps"] = 28
-    if (s.width, s.height) not in SAFE_RESOLUTIONS:
-        updates.update({"width": 832, "height": 1216})
-    if updates:
-        s = patch_settings(user_id, **updates)
-    return s
-
-def safe_generation_defaults() -> dict:
-    defaults = UserSettings()
-    return {
-        "width": defaults.width,
-        "height": defaults.height,
-        "steps": defaults.steps,
-        "scale": defaults.scale,
-        "seed": defaults.seed,
-        "negative_prompt": defaults.negative_prompt,
-        "model_name": defaults.model_name,
-        "sampler": defaults.sampler,
-        "n_samples": 1,
-        "uc_preset": defaults.uc_preset,
-        "cfg_rescale": defaults.cfg_rescale,
-        "noise_schedule": defaults.noise_schedule,
-        "variety_plus": defaults.variety_plus,
-        "img2img_strength": defaults.img2img_strength,
-        "img2img_noise": defaults.img2img_noise,
-        "pro_mode": False,
-        "nai_site_mode": False,
-    }
-
-def artraccoon_prompt_defaults() -> dict:
-    return {
-        "artraccoon_base_prompt": "",
-        "artraccoon_base_uc": "",
-        "artraccoon_character_prompt": "",
-        "artraccoon_character_uc": "",
-        "artraccoon_character_negative": "",
-        "artraccoon_character_position": "",
-    }
-
-def today_key() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
-
-def daily_count_for(s) -> int:
-    return int(s.daily_generation_count or 0) if s.daily_generation_date == today_key() else 0
-
-def remaining_generations(user_id: int) -> int | None:
-    if user_id in ADMIN_IDS:
-        return None
-    return max(0, DAILY_GENERATION_LIMIT - daily_count_for(get_settings(user_id)))
-
-def mark_generation_started(user_id: int) -> None:
-    s = get_settings(user_id)
-    updates = {"last_generation_started_at": datetime.now(timezone.utc).isoformat()}
-    if user_id not in ADMIN_IDS:
-        count = daily_count_for(s)
-        updates.update({"daily_generation_date": today_key(), "daily_generation_count": count + 1})
-    patch_settings(user_id, **updates)
-
-def cooldown_remaining(user_id: int) -> int:
-    if user_id in ADMIN_IDS:
-        return 0
-    raw = get_settings(user_id).last_generation_started_at
-    if not raw:
-        return 0
-    try:
-        started = datetime.fromisoformat(raw)
-    except ValueError:
-        return 0
-    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-    return max(0, int(NON_ADMIN_COOLDOWN_SECONDS - elapsed))
 
 def user_label(user: types.User) -> str:
     parts = [f"id={user.id}"]
@@ -616,18 +273,6 @@ def prepare_prompt_for_user(user_id: int, text: str, force_tags: bool = False) -
     original = "" if converted == text and looks_like_english_tags(text) else text
     return converted, original
 
-def presets_text() -> str:
-    lines = [
-        "⚡ <b>Быстрые пресеты</b>",
-        "",
-        "▶️ — сразу сгенерировать.",
-        "✍️ — показать промт, чтобы скопировать или дописать.",
-        "",
-        "Доступные идеи:",
-    ]
-    for preset in QUICK_PRESETS.values():
-        lines.append(f"• <b>{preset['title']}</b>")
-    return "\n".join(lines)
 
 async def send_last_prompt(message: types.Message, actor: types.User | None = None) -> None:
     user = actor or message.from_user
@@ -1016,7 +661,7 @@ async def generate_image_from_prompt(
             )
             set_last_payload(user_id, sanitize_payload(nai.last_payload))
         timestamp = datetime.now(timezone.utc).isoformat()
-        saved_images = _save_generated_images(user_id, timestamp, images)
+        saved_images = save_generated_images(user_id, timestamp, images)
         history_item = {
             "prompt": prompt,
             "original_prompt": original_prompt,
@@ -1465,7 +1110,7 @@ def _first_item_image_path(item: dict) -> Path | None:
         return None
     for image in images:
         if isinstance(image, dict):
-            path = _safe_existing_generated_path(str(image.get("path") or ""))
+            path = safe_existing_generated_path(str(image.get("path") or ""))
             if path:
                 return path
     return None
