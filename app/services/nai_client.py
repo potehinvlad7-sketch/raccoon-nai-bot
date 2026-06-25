@@ -1,6 +1,7 @@
 import base64
 import io
 import logging
+import copy
 import zipfile
 from typing import Awaitable, Callable, Optional
 
@@ -10,6 +11,9 @@ from config_defaults import MODELS, UC_PRESETS, UserSettings
 
 log = logging.getLogger(__name__)
 SAFE_DEFAULT_MODEL = "nai-diffusion-4-5-full"
+SECRET_PAYLOAD_KEYS = {"authorization", "token", "api_token", "access_token", "secret"}
+SITE_MODE_STEPS = 28
+SITE_MODE_SCALE = 5.0
 
 
 def _join_prompt_parts(parts: list[str]) -> str:
@@ -24,6 +28,49 @@ def _character_caption(prompt: str, position: str = "") -> dict:
     if pos:
         caption["position"] = pos
     return caption
+
+def sanitize_payload(payload: dict) -> dict:
+    """Return a deep-copied payload with any accidental secret-like fields removed."""
+    def clean(value):
+        if isinstance(value, dict):
+            return {
+                key: clean(item)
+                for key, item in value.items()
+                if str(key).lower() not in SECRET_PAYLOAD_KEYS
+            }
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return value
+    return clean(copy.deepcopy(payload))
+
+def payload_summary(payload: dict, settings: UserSettings | None = None) -> dict:
+    parameters = payload.get("parameters", {})
+    v4_prompt = parameters.get("v4_prompt", {})
+    v4_negative = parameters.get("v4_negative_prompt", {})
+    uc_preset = parameters.get("ucPreset")
+    if settings:
+        uc_preset = f"{settings.uc_preset} / ucPreset={uc_preset}"
+    return {
+        "model": payload.get("model"),
+        "width": parameters.get("width"),
+        "height": parameters.get("height"),
+        "steps": parameters.get("steps"),
+        "scale": parameters.get("scale"),
+        "cfg_rescale": parameters.get("cfg_rescale"),
+        "sampler": parameters.get("sampler"),
+        "noise_schedule": parameters.get("noise_schedule"),
+        "seed": parameters.get("seed", "random/omitted"),
+        "uc_preset": uc_preset,
+        "negative_prompt": parameters.get("negative_prompt", ""),
+        "n_samples": parameters.get("n_samples"),
+        "v4_prompt_fields": list(v4_prompt.keys()) if isinstance(v4_prompt, dict) else [],
+        "v4_negative_prompt_fields": list(v4_negative.keys()) if isinstance(v4_negative, dict) else [],
+        "character_payload": bool(
+            isinstance(v4_prompt, dict)
+            and v4_prompt.get("caption", {}).get("char_captions")
+        ),
+        "site_mode": bool(settings.nai_site_mode) if settings else None,
+    }
 
 class NovelAIError(RuntimeError):
     pass
@@ -41,6 +88,7 @@ class NovelAIClient:
         self.default_model = default_model.strip()
         self.proxy_url = proxy_url.strip()
         self.base_url = "https://image.novelai.net"
+        self.last_payload: dict = {}
 
     def _headers(self) -> dict:
         return {
@@ -104,14 +152,14 @@ class NovelAIClient:
             "params_version": 3,
             "width": settings.width,
             "height": settings.height,
-            "scale": settings.scale,
+            "scale": SITE_MODE_SCALE if settings.nai_site_mode else settings.scale,
             "sampler": settings.sampler,
-            "steps": settings.steps,
-            "n_samples": settings.n_samples,
+            "steps": SITE_MODE_STEPS if settings.nai_site_mode else settings.steps,
+            "n_samples": 1 if settings.nai_site_mode else settings.n_samples,
             "ucPreset": 0,
             "qualityToggle": settings.add_quality_tags,
             "dynamic_thresholding": False,
-            "cfg_rescale": settings.cfg_rescale,
+            "cfg_rescale": 0 if settings.nai_site_mode else settings.cfg_rescale,
             "noise_schedule": settings.noise_schedule,
             "negative_prompt": uc,
         }
@@ -217,6 +265,19 @@ class NovelAIClient:
         image_b64 = base64.b64encode(image_bytes).decode("utf-8") if image_bytes else None
         mask_b64 = base64.b64encode(mask_bytes).decode("utf-8") if mask_bytes else None
         payload = self.build_payload(prompt, settings, image_b64=image_b64, mask_b64=mask_b64)
+        self.last_payload = sanitize_payload(payload)
+        summary = payload_summary(payload, settings)
+        log.info(
+            "NovelAI payload summary: model=%s, size=%sx%s, sampler=%s, noise=%s, steps=%s, scale=%s, seed=%s",
+            summary["model"],
+            summary["width"],
+            summary["height"],
+            summary["sampler"],
+            summary["noise_schedule"],
+            summary["steps"],
+            summary["scale"],
+            summary["seed"],
+        )
 
         client_kwargs = {"timeout": 180}
         if self.proxy_url:
@@ -243,6 +304,7 @@ class NovelAIClient:
                     mask_b64=mask_b64,
                     force_character_concat=True,
                 )
+                self.last_payload = sanitize_payload(payload)
                 r = await client.post(
                     f"{self.base_url}/ai/generate-image",
                     headers=self._headers(),

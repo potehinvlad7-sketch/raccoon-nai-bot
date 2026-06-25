@@ -22,7 +22,7 @@ from keyboards import (
     main_menu as base_main_menu, settings_menu, modes_menu, presets_menu, pending_prompt_menu,
     after_generation_menu, generation_item_menu, artraccoon_menu, meta_import_menu, confirm_reset_menu, model_menu, size_menu, sampler_menu, uc_menu, noise_menu, seed_menu, samples_menu, moderation_dictionary_menu, dictionary_menu, dictionary_pending_menu
 )
-from app.services.nai_client import NovelAIClient, NovelAIError
+from app.services.nai_client import NovelAIClient, NovelAIError, payload_summary, sanitize_payload
 from prompt_tools import (
     DICTIONARY_PATH, add_learned_mapping, has_unknown_russian, learn_from_english_prompt,
     load_learned_dictionary, natural_to_nai_tags, parse_english_tags, reject_tags,
@@ -30,7 +30,8 @@ from prompt_tools import (
 )
 from storage import (
     get_settings, save_settings, patch_settings, add_history, get_history,
-    add_favorite, get_favorites, delete_favorite, set_last_metadata, get_last_metadata
+    add_favorite, get_favorites, delete_favorite, set_last_metadata, get_last_metadata,
+    set_last_payload, get_last_payload
 )
 
 load_dotenv()
@@ -156,6 +157,7 @@ def parse_nai_metadata(data: bytes) -> dict:
         "sampler": ["sampler"],
         "uc_preset": ["ucPreset", "uc_preset"],
         "noise_schedule": ["noise_schedule", "noiseSchedule"],
+        "cfg_rescale": ["cfg_rescale", "cfgRescale"],
     }
     meta = {}
     for target, keys in aliases.items():
@@ -178,6 +180,7 @@ def parse_nai_metadata(data: bytes) -> dict:
         "height": r"height[:=]\s*(\d+)",
         "steps": r"steps[:=]\s*(\d+)",
         "scale": r"(?:scale|guidance)[:=]\s*([0-9.]+)",
+        "cfg_rescale": r"(?:cfg_rescale|cfg rescale)[:=]\s*([0-9.]+)",
         "seed": r"seed[:=]\s*(\d+)",
     }.items():
         if target not in meta:
@@ -222,11 +225,28 @@ def _safe_existing_generated_path(raw_path: str) -> Path | None:
 def metadata_summary(meta: dict) -> str:
     if not meta:
         return "📭 NovelAI metadata не найдена. Можно попробовать отправить оригинальный PNG/WebP/JPEG как файл."
-    labels = {"prompt": "Prompt", "negative_prompt": "UC/негатив", "model": "Model", "width": "Width", "height": "Height", "steps": "Steps", "scale": "Guidance", "seed": "Seed", "sampler": "Sampler", "uc_preset": "UC preset", "noise_schedule": "Noise"}
+    labels = {"prompt": "Prompt", "negative_prompt": "UC/негатив", "model": "Model", "width": "Width", "height": "Height", "steps": "Steps", "scale": "Guidance", "cfg_rescale": "CFG rescale", "seed": "Seed", "sampler": "Sampler", "uc_preset": "UC preset", "noise_schedule": "Noise"}
     lines = ["📦 <b>Нашла metadata</b>"]
     for key, label in labels.items():
         if key in meta:
             lines.append(f"<b>{label}:</b> <code>{html.escape(str(meta[key])[:900])}</code>")
+    return "\n".join(lines)
+
+def metadata_settings_summary(meta: dict) -> str:
+    if not meta:
+        return "📭 Metadata settings не найдены."
+    keys = ["model", "width", "height", "steps", "scale", "cfg_rescale", "sampler", "noise_schedule", "seed", "uc_preset", "negative_prompt"]
+    lines = ["📋 <b>Настройки metadata</b>"]
+    for key in keys:
+        if key in meta:
+            lines.append(f"<b>{html.escape(key)}:</b> <code>{html.escape(str(meta[key])[:900])}</code>")
+    return "\n".join(lines)
+
+def nai_payload_summary_text(payload: dict, settings) -> str:
+    summary = payload_summary(payload, settings)
+    lines = ["🧪 <b>NovelAI payload summary</b>"]
+    for key, value in summary.items():
+        lines.append(f"<b>{html.escape(str(key))}:</b> <code>{html.escape(str(value))[:1200]}</code>")
     return "\n".join(lines)
 
 def art_prompt_preview_text(s) -> str:
@@ -309,6 +329,7 @@ def safe_generation_defaults() -> dict:
         "img2img_strength": defaults.img2img_strength,
         "img2img_noise": defaults.img2img_noise,
         "pro_mode": False,
+        "nai_site_mode": False,
     }
 
 def artraccoon_prompt_defaults() -> dict:
@@ -718,6 +739,42 @@ async def nai_debug_cmd(message: types.Message):
         parse_mode="HTML",
     )
 
+@dp.message(Command("nai_payload"))
+async def nai_payload_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    s = get_settings(message.from_user.id)
+    payload = get_last_payload(message.from_user.id) or sanitize_payload(nai.build_payload(s.last_prompt or "debug prompt", s))
+    await message.answer(nai_payload_summary_text(payload, s), parse_mode="HTML")
+
+
+@dp.message(Command("nai_payload_full"))
+async def nai_payload_full_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    payload = sanitize_payload(get_last_payload(message.from_user.id))
+    if not payload:
+        await message.answer("📭 Last NovelAI payload пока не сохранён. Сгенерируй изображение или используй /nai_payload для preview.")
+        return
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    await message.answer_document(BufferedInputFile(data, filename="novelai_payload.json"))
+
+
+@dp.message(Command("nai_site_mode"))
+async def nai_site_mode_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    s = get_settings(message.from_user.id)
+    s = patch_settings(message.from_user.id, nai_site_mode=not s.nai_site_mode)
+    await message.answer(
+        "🌐 Website-compatible mode: "
+        f"<code>{'ON' if s.nai_site_mode else 'OFF'}</code>",
+        parse_mode="HTML",
+    )
+
 
 async def notify_admins_about_prompt(message: types.Message, prompt: str) -> None:
     """Отправляет админу промт и настройки пользователя для мягкой модерации."""
@@ -823,6 +880,7 @@ async def generate_image_from_prompt(
                 ),
                 timeout=GENERATION_TIMEOUT_SECONDS,
             )
+            set_last_payload(user_id, sanitize_payload(nai.last_payload))
         timestamp = datetime.now(timezone.utc).isoformat()
         saved_images = _save_generated_images(user_id, timestamp, images)
         history_item = {
@@ -1434,7 +1492,7 @@ def metadata_settings_updates(meta: dict) -> dict:
     updates = {}
     for key, target, cast in [
         ("width", "width", int), ("height", "height", int), ("steps", "steps", int),
-        ("scale", "scale", float), ("seed", "seed", int),
+        ("scale", "scale", float), ("cfg_rescale", "cfg_rescale", float), ("seed", "seed", int),
     ]:
         if key in meta:
             try:
@@ -1451,6 +1509,8 @@ def metadata_settings_updates(meta: dict) -> dict:
         if meta.get("model") in (name, value):
             updates["model_name"] = name
             break
+    if meta.get("negative_prompt"):
+        updates["negative_prompt"] = str(meta["negative_prompt"])
     return updates
 
 @dp.callback_query(F.data.startswith("meta:"))
@@ -1459,6 +1519,10 @@ async def cb_meta_apply(call: types.CallbackQuery):
     meta = get_last_metadata(call.from_user.id)
     if not meta:
         await call.answer("Metadata не найдена", show_alert=True)
+        return
+    if action == "show_settings":
+        await call.message.answer(metadata_settings_summary(meta), parse_mode="HTML")
+        await call.answer("Показываю настройки")
         return
     s = get_settings(call.from_user.id)
     updates = {}

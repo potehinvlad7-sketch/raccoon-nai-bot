@@ -32,7 +32,8 @@ def get_settings(user_id: int) -> UserSettings:
 
 def save_settings(user_id: int, settings: UserSettings) -> None:
     data = load_all()
-    data[str(user_id)] = settings.to_dict()
+    user = data.setdefault(str(user_id), {})
+    user.update(settings.to_dict())
     save_all(data)
 
 def patch_settings(user_id: int, **kwargs) -> UserSettings:
@@ -92,3 +93,17 @@ def get_last_metadata(user_id: int) -> dict:
     data = load_all()
     meta = data.get(str(user_id), {}).get("last_metadata", {})
     return meta if isinstance(meta, dict) else {}
+
+
+def set_last_payload(user_id: int, payload: dict) -> None:
+    data = load_all()
+    key = str(user_id)
+    user = data.setdefault(key, get_settings(user_id).to_dict())
+    user["last_nai_payload"] = payload
+    save_all(data)
+
+
+def get_last_payload(user_id: int) -> dict:
+    data = load_all()
+    payload = data.get(str(user_id), {}).get("last_nai_payload", {})
+    return payload if isinstance(payload, dict) else {}
