@@ -166,7 +166,7 @@ def natural_to_nai_tags(text: str) -> str:
     lowered = source.lower()
     tags: list[str] = []
     consumed: list[tuple[int, int]] = []
-    combined = {**load_learned_dictionary()["ru_to_tags"], **RU_TAGS}
+    combined = {**RU_TAGS, **load_learned_dictionary()["ru_to_tags"]}
     for src in sorted(combined, key=len, reverse=True):
         for match in re.finditer(rf"(?<![а-яё]){re.escape(src)}(?![а-яё])", lowered):
             if any(not (match.end() <= a or match.start() >= b) for a, b in consumed):
@@ -191,7 +191,7 @@ def has_unknown_russian(text: str) -> bool:
     if not _CYRILLIC_RE.search(source):
         return False
     consumed: list[tuple[int, int]] = []
-    for src in sorted({**load_learned_dictionary()["ru_to_tags"], **RU_TAGS}, key=len, reverse=True):
+    for src in sorted({**RU_TAGS, **load_learned_dictionary()["ru_to_tags"]}, key=len, reverse=True):
         for match in re.finditer(rf"(?<![а-яё]){re.escape(src)}(?![а-яё])", source):
             consumed.append((match.start(), match.end()))
     return any(not any(m.start() >= a and m.end() <= b for a, b in consumed) for m in _WORD_RE.finditer(source))
