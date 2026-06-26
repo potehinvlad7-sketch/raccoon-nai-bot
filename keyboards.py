@@ -221,3 +221,17 @@ def dictionary_pending_menu(tags: list[str]) -> InlineKeyboardMarkup:
     buttons.append(InlineKeyboardButton(text="❌ Reject all", callback_data="dict:reject_pending"))
     buttons.append(InlineKeyboardButton(text="⬅️ Dictionary", callback_data="dict:menu"))
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+def admin_panel_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
+        InlineKeyboardButton(text="⚙️ Дефолты обычного режима", callback_data="admin:basic_defaults"),
+        InlineKeyboardButton(text="🦝 ArtRaccoon Vibe", callback_data="admin:ar_vibe"),
+        InlineKeyboardButton(text="🧪 NovelAI debug", callback_data="admin:nai_debug"),
+        InlineKeyboardButton(text="📚 Словарь", callback_data="admin:dict"),
+        InlineKeyboardButton(text="💎 Покупки / генерации", callback_data="admin:soon:purchases"),
+        InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:soon:users"),
+        InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:soon:broadcast"),
+        main_menu_button(),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
