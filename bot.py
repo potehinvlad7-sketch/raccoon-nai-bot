@@ -45,7 +45,12 @@ from services.generation import (
 from services.metadata import (
     metadata_settings_summary, metadata_summary, nai_compare_summary_text, parse_nai_metadata,
 )
-from ui.texts import nai_payload_summary_text, presets_text, prompt_preview_text
+from ui.texts import (
+    CANCEL_TEXT, CLEAR_TEXT, DAILY_LIMIT_TEXT, EDIT_PROMPT_TEXT, GENERATION_STARTED_TEXT,
+    PAID_PLACEHOLDER_TEXT, PROMPT_EMPTY_TEXT, cooldown_text, generation_result_caption,
+    howto_text as branded_howto_text, main_menu_text, nai_payload_summary_text,
+    presets_text, prompt_preview_text, prompt_request_text, start_text,
+)
 
 load_dotenv()
 
@@ -159,7 +164,7 @@ def settings_from_basic_defaults() -> UserSettings:
             setattr(base, key, value)
     return base
 
-PAID_PLACEHOLDER = "Функция доступна в платном режиме. Скоро добавим."
+PAID_PLACEHOLDER = PAID_PLACEHOLDER_TEXT
 ANLAS_WARNING = PAID_PLACEHOLDER
 generation_lock = asyncio.Lock()
 generation_waiting = 0
@@ -268,7 +273,7 @@ async def send_moderation_image(bot_obj: Bot, user: types.User, img: bytes, orig
 async def show_pending_prompt(message: types.Message, user_id: int) -> None:
     s = get_settings(user_id)
     if not s.pending_prompt:
-        await message.answer("📝 Черновик пуст. Пришли новый промт обычным сообщением.", reply_markup=main_menu())
+        await message.answer(PROMPT_EMPTY_TEXT, reply_markup=main_menu())
         return
     preview = art_prompt_preview_text(s) if s.artraccoon_mode else prompt_preview_text(s.pending_prompt, s.pending_original_prompt, s, remaining_generations(user_id))
     await message.answer(
@@ -280,17 +285,7 @@ async def show_pending_prompt(message: types.Message, user_id: int) -> None:
 
 def howto_text(user_id: int | None = None) -> str:
     remaining = remaining_generations(user_id) if user_id is not None else None
-    remaining_line = f"\n\nСегодня осталось: {remaining}/{DAILY_GENERATION_LIMIT}." if remaining is not None else ""
-    return (
-        "📘 <b>Инструкция</b>\n\n"
-        "1. Просто отправь текст с идеей картинки.\n"
-        "2. Бот покажет черновик и кнопку генерации.\n"
-        "3. Нажми ✅ Генерировать.\n"
-        "4. Лимит: 10 генераций в сутки.\n"
-        "5. Между генерациями есть пауза 60 секунд.\n"
-        "6. Расширенные функции появятся в платном режиме. 🦝"
-        + remaining_line
-    )
+    return branded_howto_text(remaining, DAILY_GENERATION_LIMIT)
 
 def settings_text(user_id: int) -> str:
     s = get_settings(user_id)
@@ -373,12 +368,8 @@ async def retry_last_prompt(message: types.Message, actor: types.User | None = N
 @dp.message(Command("start"))
 async def start(message: types.Message):
     get_settings(message.from_user.id)
-    admin_line = "\n\nАдмин-панель и специальные команды доступны как раньше." if message.from_user.id in ADMIN_IDS else ""
     await message.answer(
-        "🦝 <b>Привет! Я NovelAI bot</b>\n\n"
-        "Напиши идею картинки обычным сообщением — я покажу черновик и кнопку генерации.\n"
-        f"Сегодня осталось: <b>{remaining_generations(message.from_user.id)}/{DAILY_GENERATION_LIMIT}</b>."
-        + admin_line,
+        start_text(remaining_generations(message.from_user.id), DAILY_GENERATION_LIMIT, message.from_user.id in ADMIN_IDS),
         reply_markup=main_menu(),
         parse_mode="HTML",
     )
@@ -733,12 +724,12 @@ async def generate_image_from_prompt(
 
     user_id = user.id
     if user_id not in ADMIN_IDS and remaining_generations(user_id) == 0:
-        await message.answer("🎨 Лимит на сегодня закончился: 10/10 генераций. Попробуй завтра.", reply_markup=main_menu())
+        await message.answer(DAILY_LIMIT_TEXT, reply_markup=main_menu())
         return
 
     cd = cooldown_remaining(user_id)
     if cd > 0:
-        await message.answer(f"⏳ Подожди ещё {cd} сек. перед следующей генерацией.", reply_markup=main_menu())
+        await message.answer(cooldown_text(cd), reply_markup=main_menu())
         return
 
     s = patch_settings(user_id, last_prompt=prompt)
@@ -755,7 +746,7 @@ async def generate_image_from_prompt(
     if generation_lock.locked() or generation_waiting:
         await message.answer(f"⏳ Генерация поставлена в очередь. Перед тобой: {generation_waiting}")
     generation_waiting += 1
-    wait = await message.answer("🎨 Генерирую...")
+    wait = await message.answer(GENERATION_STARTED_TEXT)
 
     image_bytes = None
     if is_advanced_user(user_id) and s.pending_image_path and Path(s.pending_image_path).exists():
@@ -808,7 +799,7 @@ async def generate_image_from_prompt(
         for idx, img in enumerate(images, start=1):
             name = f"novelai_{idx}.png"
             image = BufferedInputFile(img, filename=name)
-            caption = f"✅ <b>Готово</b>\\nSeed: <code>{s.seed}</code>\\nРазмер: <code>{s.width}x{s.height}</code>"
+            caption = generation_result_caption(s.model_name, s.width, s.height, s.seed)
             try:
                 await send_moderation_image(message.bot, user, img, original_prompt, final_prompt, s, idx, candidates, hidden_vibe_applied)
                 await message.answer_photo(
@@ -950,8 +941,7 @@ async def cb_basic_defaults(call: types.CallbackQuery):
 @dp.callback_query(F.data == "menu:main")
 async def cb_main(call: types.CallbackQuery):
     await call.message.edit_text(
-        "🦝 <b>Главное меню</b>\n\n"
-        "Выбери действие: новый промт, быстрый пресет, повтор последней генерации или настройки.",
+        main_menu_text(),
         reply_markup=main_menu(),
         parse_mode="HTML",
     )
@@ -999,11 +989,7 @@ async def cb_reset_confirm(call: types.CallbackQuery):
 async def cb_gen(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(GenState.waiting_prompt)
     await call.message.edit_text(
-        "🎨 <b>Генерация</b>\n\n"
-        "Отправь промт обычным сообщением.\n\n"
-        "Пример:\n"
-        "<code>1girl, raccoon ears, pink eyes, ruins, sketch</code>\n\n"
-        "Чтобы отменить: /cancel",
+        prompt_request_text(),
         reply_markup=main_menu(),
         parse_mode="HTML",
     )
@@ -1077,7 +1063,7 @@ async def cb_edit_last_prompt(call: types.CallbackQuery):
         await call.answer("Пока нечего изменить", show_alert=True)
         return
     patch_settings(call.from_user.id, pending_prompt=s.last_prompt, pending_original_prompt=s.last_prompt, prompt_action="replace")
-    await call.message.answer("✏️ Пришли обновлённый промпт — я заменю текущий и покажу черновик.")
+    await call.message.answer(EDIT_PROMPT_TEXT)
     await call.answer()
 
 @dp.callback_query(F.data == "quick:retry")
@@ -1108,11 +1094,10 @@ async def cb_prompt_confirm(call: types.CallbackQuery):
         prompt = s.artraccoon_base_prompt.strip()
     if not prompt and not (s.artraccoon_mode and s.artraccoon_character_prompt.strip()):
         await call.answer("Черновик пуст", show_alert=True)
-        await call.message.answer("📝 Черновик пуст. Пришли новый промт обычным сообщением.", reply_markup=main_menu())
+        await call.message.answer(PROMPT_EMPTY_TEXT, reply_markup=main_menu())
         return
     patch_settings(call.from_user.id, prompt_action="")
     await call.answer("Запускаю генерацию")
-    await call.message.answer("✅ Отлично, запускаю генерацию по черновику.")
     await generate_image_from_prompt(call.message, prompt, actor=call.from_user)
 
 @dp.callback_query(F.data == "prompt:append")
@@ -1121,20 +1106,20 @@ async def cb_prompt_append(call: types.CallbackQuery):
         await call.answer("Сначала пришли промт", show_alert=True)
         return
     patch_settings(call.from_user.id, prompt_action="append")
-    await call.message.answer("✏️ Пришли текст, который нужно дописать к текущему промту. Я добавлю его в черновик.")
+    await call.message.answer("✏️ Пришли, что добавить — аккуратно допишу в черновик.")
     await call.answer()
 
 @dp.callback_query(F.data == "prompt:replace")
 async def cb_prompt_replace(call: types.CallbackQuery):
     patch_settings(call.from_user.id, prompt_action="replace")
-    await call.message.answer("✏️ Пришли обновлённый промпт — я заменю текущий черновик.")
+    await call.message.answer(EDIT_PROMPT_TEXT)
     await call.answer()
 
 
 @dp.callback_query(F.data == "prompt:clear")
 async def cb_prompt_clear(call: types.CallbackQuery):
     patch_settings(call.from_user.id, pending_prompt="", pending_original_prompt="", prompt_action="")
-    await call.message.answer("🧹 Черновик очищен. Пришли новый промпт обычным сообщением.", reply_markup=main_menu())
+    await call.message.answer(CLEAR_TEXT, reply_markup=main_menu())
     await call.answer("Очищено")
 
 
@@ -1159,7 +1144,7 @@ async def cb_paid_placeholder(call: types.CallbackQuery):
 @dp.callback_query(F.data == "prompt:cancel")
 async def cb_prompt_cancel(call: types.CallbackQuery):
     patch_settings(call.from_user.id, pending_prompt="", pending_original_prompt="", prompt_action="")
-    await call.message.answer("❌ Черновик очищен. Когда будешь готов — пришли новый промт обычным сообщением.", reply_markup=main_menu())
+    await call.message.answer(CANCEL_TEXT, reply_markup=main_menu())
     await call.answer("Отменено")
 
 @dp.callback_query(F.data.startswith("settings:"))
@@ -1566,7 +1551,7 @@ async def cancel_cmd(message: types.Message, state: FSMContext):
     await state.clear()
     if message.from_user is not None:
         patch_settings(message.from_user.id, pending_prompt="", pending_original_prompt="", prompt_action="")
-    await message.answer("Отменила ввод промта и очистила черновик.", reply_markup=main_menu())
+    await message.answer(CANCEL_TEXT, reply_markup=main_menu())
 
 
 
@@ -1715,7 +1700,7 @@ async def gen_from_button(message: types.Message, state: FSMContext):
     prompt = message.text.strip() if message.text else ""
 
     if not prompt:
-        await message.answer("Пришли текстовый промт или нажми /cancel.", reply_markup=main_menu())
+        await message.answer("🖼️ Пришли текстовый промпт или нажми /cancel.", reply_markup=main_menu())
         return
 
     await state.clear()
@@ -2177,7 +2162,7 @@ async def plain_text_prompt(message: types.Message):
         return
     text = message.text.strip()
     if not text:
-        await message.answer("Пришли текстовый промт — я подготовлю черновик перед генерацией.", reply_markup=main_menu())
+        await message.answer(PROMPT_EMPTY_TEXT, reply_markup=main_menu())
         return
 
     s = get_settings(message.from_user.id)
@@ -2188,7 +2173,7 @@ async def plain_text_prompt(message: types.Message):
         if s.artraccoon_mode:
             updates["artraccoon_character_prompt"] = stored_original
         patch_settings(message.from_user.id, **updates)
-        await message.answer("✏️ Добавила текст к черновику.")
+        await message.answer("✨ Добавила к черновику.")
     else:
         converted, original = prepare_prompt_for_user(message.from_user.id, text)
         updates = {"pending_prompt": converted, "pending_original_prompt": original, "prompt_action": ""}
@@ -2196,7 +2181,7 @@ async def plain_text_prompt(message: types.Message):
             updates["artraccoon_character_prompt"] = original
         patch_settings(message.from_user.id, **updates)
         if s.prompt_action == "replace":
-            await message.answer("🔁 Заменила черновик новым промтом.")
+            await message.answer("✨ Черновик обновлён.")
 
     await show_pending_prompt(message, message.from_user.id)
 
