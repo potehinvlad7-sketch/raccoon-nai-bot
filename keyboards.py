@@ -279,6 +279,7 @@ def admin_users_menu() -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(text="🔎 Найти пользователя по ID", callback_data="admin_users:find"),
         InlineKeyboardButton(text="👥 Все пользователи", callback_data="admin_users:all:0"),
+        InlineKeyboardButton(text="🔄 Обновить пользователей", callback_data="admin_users:refresh"),
         InlineKeyboardButton(text="🖼 История пользователя", callback_data="admin_users:history"),
         InlineKeyboardButton(text="⭐ Избранное пользователя", callback_data="admin_users:favorites"),
         InlineKeyboardButton(text="🧹 Очистить черновик пользователя", callback_data="admin_users:clear_draft"),

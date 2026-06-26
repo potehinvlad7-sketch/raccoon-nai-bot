@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
@@ -137,19 +138,49 @@ class GenState(StatesGroup):
     waiting_purchase_amount = State()
     waiting_admin_user_id = State()
     waiting_broadcast_text = State()
+    waiting_basic_steps = State()
+    waiting_basic_cfg = State()
+    waiting_basic_negative = State()
 
 def main_menu():
     return base_main_menu(CHANNEL_URL)
 
 def basic_defaults_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🧠 Модель", callback_data="basic_defaults:choose_model"),
+            InlineKeyboardButton(text="📐 Размер", callback_data="basic_defaults:choose_size"),
+        ],
+        [
+            InlineKeyboardButton(text="👣 Шаги", callback_data="basic_defaults:ask_steps"),
+            InlineKeyboardButton(text="🧲 CFG", callback_data="basic_defaults:ask_cfg"),
+        ],
+        [
+            InlineKeyboardButton(text="🧪 Sampler", callback_data="basic_defaults:choose_sampler"),
+            InlineKeyboardButton(text="🧯 Негатив", callback_data="basic_defaults:ask_negative"),
+        ],
+        [InlineKeyboardButton(text="✨ Quality tags ON/OFF", callback_data="basic_defaults:toggle_quality")],
+        [InlineKeyboardButton(text="🦝 Variety+ ON/OFF", callback_data="basic_defaults:toggle_variety")],
         [InlineKeyboardButton(text="💾 Сохранить мои настройки", callback_data="basic_defaults:save")],
-        [InlineKeyboardButton(text="👁 Показать подробно", callback_data="basic_defaults:show")],
         [InlineKeyboardButton(text="♻️ Сбросить", callback_data="basic_defaults:reset")],
+        [InlineKeyboardButton(text="👁 Показать подробно", callback_data="basic_defaults:show")],
         [InlineKeyboardButton(text="🧪 Тест", callback_data="basic_defaults:test")],
         [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="admin:menu")],
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")],
     ])
+
+
+def basic_defaults_select_menu(kind: str) -> InlineKeyboardMarkup:
+    if kind == "model":
+        buttons = [InlineKeyboardButton(text=name, callback_data=f"basic_defaults:set_model:{name}") for name in MODELS]
+    elif kind == "size":
+        buttons = [InlineKeyboardButton(text=name, callback_data=f"basic_defaults:set_size:{name}") for name, size in RESOLUTIONS.items() if size in SAFE_RESOLUTIONS]
+    elif kind == "sampler":
+        buttons = [InlineKeyboardButton(text=name, callback_data=f"basic_defaults:set_sampler:{name}") for name in SAMPLERS]
+    else:
+        buttons = []
+    keyboard = [buttons[i:i + 1] for i in range(0, len(buttons), 1)]
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:basic_defaults")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def basic_defaults_text(defaults: dict | None = None, *, saved: bool | None = None) -> str:
@@ -191,6 +222,27 @@ def basic_defaults_details_text(defaults: dict | None = None, *, saved: bool | N
         "n_samples: <code>1 (forced)</code>\n"
         "seed: <code>random (-1)</code>"
     )
+
+
+
+def update_basic_defaults_config(**updates) -> dict:
+    defaults = saved_basic_defaults()
+    defaults.update(updates)
+    defaults = sanitize_basic_defaults(defaults, clamp_steps=True)
+    defaults["steps"] = min(28, max(1, int(defaults.get("steps", 28))))
+    defaults["scale"] = min(10.0, max(1.0, float(defaults.get("scale", 8.0))))
+    defaults["n_samples"] = 1
+    defaults["seed"] = -1
+    set_config_value("basic_generation_defaults", defaults)
+    return defaults
+
+
+def parse_basic_steps(raw: str) -> int:
+    return min(28, max(1, int((raw or "").strip())))
+
+
+def parse_basic_cfg(raw: str) -> float:
+    return min(10.0, max(1.0, float((raw or "").strip().replace(",", "."))))
 
 def settings_from_basic_defaults() -> UserSettings:
     base = UserSettings()
@@ -1101,6 +1153,43 @@ def admin_users_page_text(page: int, per_page: int = 20) -> tuple[str, InlineKey
     text = f"👥 <b>Все пользователи</b>\nСтраница <code>{page + 1}/{total_pages}</code> · всего: <code>{total}</code>\n\n" + ("\n".join(lines) or "—")
     return text, admin_users_page_menu(page, total_pages)
 
+
+async def refresh_admin_user_identities(progress_message: types.Message) -> tuple[int, int, int]:
+    users = load_all_users_for_admin_stats()
+    user_ids = [int(uid) for uid in users if str(uid).isdigit()]
+    total = len(user_ids)
+    updated = 0
+    unavailable = 0
+    last_edit = 0.0
+    loop = asyncio.get_running_loop()
+    for index, user_id in enumerate(user_ids, 1):
+        try:
+            chat = await progress_message.bot.get_chat(user_id)
+            update_user_identity(chat)
+            updated += 1
+        except (TelegramBadRequest, TelegramForbiddenError):
+            unavailable += 1
+        except Exception:
+            unavailable += 1
+            log.exception("Failed to refresh Telegram identity for user_id=%s", user_id)
+        now = loop.time()
+        if index == total or index % 10 == 0 or now - last_edit >= 2:
+            last_edit = now
+            try:
+                await progress_message.edit_text(
+                    "🔄 <b>Обновление пользователей</b>\n\n"
+                    f"Обработано: <code>{index}/{total}</code>\n"
+                    f"Обновлено: <code>{updated}</code>\n"
+                    f"Недоступно: <code>{unavailable}</code>",
+                    parse_mode="HTML",
+                    reply_markup=admin_users_menu(),
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+        await asyncio.sleep(0.1)
+    return total, updated, unavailable
+
+
 def _admin_user_summary(user_id: int) -> str:
     raw = get_user_record_for_admin(user_id)
     if not raw:
@@ -1213,16 +1302,89 @@ async def cb_admin_nai(call: types.CallbackQuery):
     await call.answer()
 
 @dp.callback_query(F.data.startswith("basic_defaults:"))
-async def cb_basic_defaults(call: types.CallbackQuery):
+async def cb_basic_defaults(call: types.CallbackQuery, state: FSMContext):
     if call.from_user.id not in ADMIN_IDS:
         await call.answer("Команда не найдена.", show_alert=True)
         return
-    action = call.data.rsplit(":", 1)[-1]
+    parts = call.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
     if action == "save":
         defaults = basic_defaults_from_settings(get_settings(call.from_user.id))
+        defaults = sanitize_basic_defaults(defaults, clamp_steps=True)
+        defaults["steps"] = min(28, int(defaults["steps"]))
+        defaults["scale"] = min(10.0, max(1.0, float(defaults["scale"])))
+        defaults["n_samples"] = 1
+        defaults["seed"] = -1
         set_config_value("basic_generation_defaults", defaults)
         await call.message.edit_text("✅ Настройки сохранены.\n\n" + basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
         await call.answer("Сохранено")
+        return
+    if action == "choose_model":
+        await call.message.edit_text("🧠 Выбери модель для обычного режима.", reply_markup=basic_defaults_select_menu("model"))
+        await call.answer()
+        return
+    if action == "choose_size":
+        await call.message.edit_text("📐 Выбери безопасный размер для обычного режима.", reply_markup=basic_defaults_select_menu("size"))
+        await call.answer()
+        return
+    if action == "choose_sampler":
+        await call.message.edit_text("🧪 Выбери sampler для обычного режима.", reply_markup=basic_defaults_select_menu("sampler"))
+        await call.answer()
+        return
+    if action == "set_model" and len(parts) >= 3:
+        name = call.data.split(":", 2)[2]
+        if name not in MODELS:
+            await call.answer("Неизвестная модель", show_alert=True)
+            return
+        defaults = update_basic_defaults_config(model_name=name)
+        await call.message.edit_text(basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        await call.answer("Модель обновлена")
+        return
+    if action == "set_size" and len(parts) >= 3:
+        name = call.data.split(":", 2)[2]
+        size = RESOLUTIONS.get(name)
+        if size not in SAFE_RESOLUTIONS:
+            await call.answer("Этот размер недоступен в обычном режиме", show_alert=True)
+            return
+        defaults = update_basic_defaults_config(width=size[0], height=size[1])
+        await call.message.edit_text(basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        await call.answer("Размер обновлён")
+        return
+    if action == "set_sampler" and len(parts) >= 3:
+        sampler = call.data.split(":", 2)[2]
+        if sampler not in SAMPLERS:
+            await call.answer("Неизвестный sampler", show_alert=True)
+            return
+        defaults = update_basic_defaults_config(sampler=sampler)
+        await call.message.edit_text(basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        await call.answer("Sampler обновлён")
+        return
+    if action == "ask_steps":
+        await state.set_state(GenState.waiting_basic_steps)
+        await call.message.answer("👣 Пришли количество шагов для обычного режима (1–28).")
+        await call.answer()
+        return
+    if action == "ask_cfg":
+        await state.set_state(GenState.waiting_basic_cfg)
+        await call.message.answer("🧲 Пришли CFG для обычного режима (1.0–10.0).")
+        await call.answer()
+        return
+    if action == "ask_negative":
+        await state.set_state(GenState.waiting_basic_negative)
+        await call.message.answer("🧯 Пришли негатив для обычного режима. Пусто или <code>-</code> — очистить.", parse_mode="HTML")
+        await call.answer()
+        return
+    if action == "toggle_quality":
+        current = saved_basic_defaults()
+        defaults = update_basic_defaults_config(add_quality_tags=not bool(current.get("add_quality_tags")))
+        await call.message.edit_text(basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        await call.answer("Quality tags переключены")
+        return
+    if action == "toggle_variety":
+        current = saved_basic_defaults()
+        defaults = update_basic_defaults_config(variety_plus=not bool(current.get("variety_plus")))
+        await call.message.edit_text(basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        await call.answer("Variety+ переключён")
         return
     if action == "show":
         raw = get_config_value("basic_generation_defaults", None)
@@ -1242,6 +1404,51 @@ async def cb_basic_defaults(call: types.CallbackQuery):
         await call.answer()
         return
     await call.answer("Unknown action", show_alert=True)
+
+
+
+@dp.message(GenState.waiting_basic_steps)
+async def basic_steps_input(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        await message.answer("Команда не найдена.")
+        return
+    try:
+        steps = parse_basic_steps(message.text or "")
+    except ValueError:
+        await message.answer("Нужно число от 1 до 28.", reply_markup=basic_defaults_menu())
+        return
+    await state.clear()
+    defaults = update_basic_defaults_config(steps=steps)
+    await message.answer("👣 Шаги обновлены.\n\n" + basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
+
+
+@dp.message(GenState.waiting_basic_cfg)
+async def basic_cfg_input(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        await message.answer("Команда не найдена.")
+        return
+    try:
+        cfg = parse_basic_cfg(message.text or "")
+    except ValueError:
+        await message.answer("Нужно число от 1.0 до 10.0.", reply_markup=basic_defaults_menu())
+        return
+    await state.clear()
+    defaults = update_basic_defaults_config(scale=cfg)
+    await message.answer("🧲 CFG обновлён.\n\n" + basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
+
+
+@dp.message(GenState.waiting_basic_negative)
+async def basic_negative_input(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        await message.answer("Команда не найдена.")
+        return
+    text = (message.text or "").strip()
+    defaults = update_basic_defaults_config(negative_prompt="" if text in {"", "-"} else text)
+    await state.clear()
+    await message.answer("🧯 Негатив обновлён.\n\n" + basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
 
 
 @dp.callback_query(F.data.startswith("admin_purchases:"))
@@ -1308,6 +1515,19 @@ async def cb_admin_users(call: types.CallbackQuery, state: FSMContext):
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         text, markup = admin_users_page_text(page)
         await call.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    elif action == "refresh":
+        await call.answer("Запускаю обновление")
+        progress = await call.message.answer("🔄 <b>Обновление пользователей</b>\n\nОбработано: <code>0</code>", parse_mode="HTML", reply_markup=admin_users_menu())
+        total, updated, unavailable = await refresh_admin_user_identities(progress)
+        await progress.edit_text(
+            "✅ Обновление завершено\n\n"
+            f"Всего: <code>{total}</code>\n"
+            f"Обновлено: <code>{updated}</code>\n"
+            f"Недоступно: <code>{unavailable}</code>",
+            parse_mode="HTML",
+            reply_markup=admin_users_menu(),
+        )
+        return
     else:
         await state.update_data(admin_user_action=action)
         await state.set_state(GenState.waiting_admin_user_id)
