@@ -212,6 +212,7 @@ def dictionary_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📤 Export", callback_data="dict:export"),
         InlineKeyboardButton(text="📥 Import", callback_data="dict:import"),
         InlineKeyboardButton(text="🧹 Cleanup rejected", callback_data="dict:cleanup"),
+        InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="admin:menu"),
         main_menu_button(),
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 2))
@@ -220,6 +221,7 @@ def dictionary_pending_menu(tags: list[str]) -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(text=tag[:60], callback_data=f"dict_one:{i}") for i, tag in enumerate(tags[:40])]
     buttons.append(InlineKeyboardButton(text="❌ Reject all", callback_data="dict:reject_pending"))
     buttons.append(InlineKeyboardButton(text="⬅️ Dictionary", callback_data="dict:menu"))
+    buttons.append(admin_back_button())
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
 
 def admin_panel_menu() -> InlineKeyboardMarkup:
@@ -229,9 +231,76 @@ def admin_panel_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🦝 ArtRaccoon Vibe", callback_data="admin:ar_vibe"),
         InlineKeyboardButton(text="🧪 NovelAI debug", callback_data="admin:nai_debug"),
         InlineKeyboardButton(text="📚 Словарь", callback_data="admin:dict"),
-        InlineKeyboardButton(text="💎 Покупки / генерации", callback_data="admin:soon:purchases"),
-        InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:soon:users"),
-        InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:soon:broadcast"),
+        InlineKeyboardButton(text="💎 Покупки / генерации", callback_data="admin:purchases"),
+        InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users"),
+        InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast"),
         main_menu_button(),
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+
+def admin_back_button() -> InlineKeyboardButton:
+    return InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="admin:menu")
+
+
+def admin_ar_vibe_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="👁 Показать вайб", callback_data="admin_ar_vibe:show"),
+        InlineKeyboardButton(text="✏️ Изменить вайб", callback_data="admin_ar_vibe:set"),
+        InlineKeyboardButton(text="🧹 Очистить вайб", callback_data="admin_ar_vibe:clear"),
+        InlineKeyboardButton(text="🏠 Назад в админку", callback_data="admin:menu"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+
+def admin_nai_debug_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="🧾 Payload summary", callback_data="admin_nai:summary"),
+        InlineKeyboardButton(text="📦 Full payload", callback_data="admin_nai:full"),
+        InlineKeyboardButton(text="🔍 Compare site mode", callback_data="admin_nai:compare"),
+        InlineKeyboardButton(text="🏠 Назад", callback_data="admin:menu"),
+        admin_back_button(),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+
+def admin_purchases_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="👤 Найти пользователя по ID", callback_data="admin_purchases:find"),
+        InlineKeyboardButton(text="➕ Выдать генерации", callback_data="admin_purchases:add"),
+        InlineKeyboardButton(text="➖ Списать генерации", callback_data="admin_purchases:subtract"),
+        InlineKeyboardButton(text="👁 Показать баланс", callback_data="admin_purchases:balance"),
+        admin_back_button(),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+
+def admin_users_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="🔎 Найти пользователя по ID", callback_data="admin_users:find"),
+        InlineKeyboardButton(text="📋 Последние пользователи", callback_data="admin_users:recent"),
+        InlineKeyboardButton(text="🖼 История пользователя", callback_data="admin_users:history"),
+        InlineKeyboardButton(text="⭐ Избранное пользователя", callback_data="admin_users:favorites"),
+        InlineKeyboardButton(text="🧹 Очистить черновик пользователя", callback_data="admin_users:clear_draft"),
+        admin_back_button(),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+
+def admin_broadcast_menu(has_draft: bool = False) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text="✏️ Написать сообщение", callback_data="admin_broadcast:write"),
+        InlineKeyboardButton(text="👥 Отправить всем пользователям", callback_data="admin_broadcast:send_all"),
+        InlineKeyboardButton(text="🧪 Тест себе", callback_data="admin_broadcast:test"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="admin_broadcast:cancel"),
+        admin_back_button(),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
+
+
+def admin_broadcast_confirm_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, отправить всем", callback_data="admin_broadcast:confirm_all")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_broadcast:cancel")],
+        [admin_back_button()],
+    ])

@@ -57,6 +57,13 @@ def load_all_users_for_admin_stats() -> dict:
         return json.loads(json.dumps(_load_all_unlocked(), ensure_ascii=False))
 
 
+def get_user_record_for_admin(user_id: int) -> dict:
+    """Return one user record snapshot for admin tools."""
+    with _STORAGE_LOCK:
+        raw = _load_all_unlocked().get(str(user_id), {})
+        return json.loads(json.dumps(raw if isinstance(raw, dict) else {}, ensure_ascii=False))
+
+
 def save_all(data: dict) -> None:
     with _STORAGE_LOCK:
         _save_all_unlocked(data)
@@ -94,6 +101,30 @@ def patch_settings(user_id: int, **kwargs) -> UserSettings:
         data[key] = user
         _save_all_unlocked(data)
         return settings
+
+
+def adjust_paid_generations_balance(user_id: int, delta: int) -> int:
+    with _STORAGE_LOCK:
+        data = _load_all_unlocked()
+        key = str(user_id)
+        user = data.setdefault(key, _default_user())
+        current = int(user.get("paid_generations_balance", 0) or 0)
+        new_balance = max(0, current + int(delta))
+        user["paid_generations_balance"] = new_balance
+        _save_all_unlocked(data)
+        return new_balance
+
+
+def clear_user_draft_for_admin(user_id: int) -> bool:
+    with _STORAGE_LOCK:
+        data = _load_all_unlocked()
+        user = data.get(str(user_id))
+        if not isinstance(user, dict):
+            return False
+        for key in ("pending_prompt", "pending_original_prompt", "prompt_action", "pending_image_path"):
+            user[key] = ""
+        _save_all_unlocked(data)
+        return True
 
 
 def add_history(user_id: int, item: dict, limit: int = 20) -> None:

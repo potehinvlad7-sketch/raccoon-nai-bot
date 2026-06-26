@@ -19,7 +19,8 @@ from dotenv import load_dotenv
 from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES, AELITA_DESCRIPTION, UserSettings
 from keyboards import (
     main_menu as base_main_menu, settings_menu, modes_menu, presets_menu, pending_prompt_menu,
-    after_generation_menu, generation_item_menu, artraccoon_menu, meta_import_menu, confirm_reset_menu, model_menu, size_menu, sampler_menu, uc_menu, noise_menu, seed_menu, samples_menu, moderation_dictionary_menu, dictionary_menu, dictionary_pending_menu, admin_panel_menu
+    after_generation_menu, generation_item_menu, artraccoon_menu, meta_import_menu, confirm_reset_menu, model_menu, size_menu, sampler_menu, uc_menu, noise_menu, seed_menu, samples_menu, moderation_dictionary_menu, dictionary_menu, dictionary_pending_menu, admin_panel_menu,
+    admin_ar_vibe_menu, admin_nai_debug_menu, admin_purchases_menu, admin_users_menu, admin_broadcast_menu, admin_broadcast_confirm_menu,
 )
 from app.services.nai_client import (
     NovelAIClient, NovelAIError, sanitize_payload,
@@ -34,7 +35,7 @@ from storage import (
     get_settings, save_settings, patch_settings, add_history, get_history,
     add_favorite, get_favorites, delete_favorite, set_last_metadata, get_last_metadata,
     set_last_payload, get_last_payload, get_config_value, set_config_value, delete_config_value,
-    load_all_users_for_admin_stats
+    load_all_users_for_admin_stats, get_user_record_for_admin, adjust_paid_generations_balance, clear_user_draft_for_admin
 )
 
 from services.generation import (
@@ -121,6 +122,10 @@ class GenState(StatesGroup):
     waiting_dict_tags = State()
     waiting_dict_review_ru = State()
     waiting_ar_vibe = State()
+    waiting_purchase_user_id = State()
+    waiting_purchase_amount = State()
+    waiting_admin_user_id = State()
+    waiting_broadcast_text = State()
 
 def main_menu():
     return base_main_menu(CHANNEL_URL)
@@ -131,6 +136,7 @@ def basic_defaults_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="👁 Show basic defaults", callback_data="basic_defaults:show")],
         [InlineKeyboardButton(text="♻ Reset basic defaults to safe factory", callback_data="basic_defaults:reset")],
         [InlineKeyboardButton(text="🧪 Test basic defaults", callback_data="basic_defaults:test")],
+        [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="admin:menu")],
         [InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:main")],
     ])
 
@@ -709,6 +715,9 @@ async def raw_cmd(message: types.Message):
 
 @dp.message(Command("nai_debug"))
 async def nai_debug_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
     s = get_settings(message.from_user.id)
     debug = nai.debug_settings(s)
     lines = [f"{key}: {value}" for key, value in debug.items()]
@@ -1022,35 +1031,104 @@ async def draw_cmd(message: types.Message):
     await generate_image_from_prompt(message, prompt)
 
 
+def _admin_user_summary(user_id: int) -> str:
+    raw = get_user_record_for_admin(user_id)
+    if not raw:
+        return f"👤 Пользователь <code>{user_id}</code> не найден."
+    safe = {k: v for k, v in raw.items() if k != "last_nai_payload"}
+    return (
+        f"👤 <b>User</b> <code>{user_id}</code>\n"
+        f"💎 Balance: <code>{int(raw.get('paid_generations_balance', 0) or 0)}</code>\n"
+        f"🖼 History: <code>{len(raw.get('history', []) if isinstance(raw.get('history'), list) else [])}</code>\n"
+        f"⭐ Favorites: <code>{len(raw.get('favorites', []) if isinstance(raw.get('favorites'), list) else [])}</code>\n"
+        f"🧹 Draft: <code>{bool(str(raw.get('pending_prompt') or '').strip())}</code>\n\n"
+        f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2)[:3000])}</pre>"
+    )
+
+
+def _admin_items_text(user_id: int, key: str, title: str) -> str:
+    raw = get_user_record_for_admin(user_id)
+    items = raw.get(key, []) if isinstance(raw, dict) else []
+    if not isinstance(items, list) or not items:
+        return f"{title} <code>{user_id}</code>\n\n—"
+    lines = []
+    for i, item in enumerate(items[:10], 1):
+        prompt = item.get("prompt") if isinstance(item, dict) else str(item)
+        ts = item.get("timestamp", "—") if isinstance(item, dict) else "—"
+        lines.append(f"{i}. <code>{html.escape(str(ts))}</code>\n{html.escape(str(prompt or '—')[:350])}")
+    return f"{title} <code>{user_id}</code>\n\n" + "\n\n".join(lines)
+
+
+def _users_count() -> int:
+    return len(load_all_users_for_admin_stats())
+
+
 @dp.callback_query(F.data.startswith("admin:"))
 async def cb_admin_panel(call: types.CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
         await call.answer("Команда не найдена.", show_alert=True)
         return
     action = call.data.split(":", 1)[1]
-    if action == "stats":
+    if action == "menu":
+        await call.message.edit_text(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_menu())
+    elif action == "stats":
         await call.message.edit_text(format_admin_stats(build_admin_stats()), parse_mode="HTML", reply_markup=admin_panel_menu())
     elif action == "basic_defaults":
         await call.message.edit_text(basic_defaults_text(), parse_mode="HTML", reply_markup=basic_defaults_menu())
     elif action == "ar_vibe":
-        vibe = artraccoon_vibe_prompt() or "—"
-        await call.message.edit_text(
-            "🦝 <b>ArtRaccoon Vibe</b>\n\n"
-            f"Текущий скрытый Vibe:\n<code>{html.escape(vibe[:3000])}</code>\n\n"
-            "Команды: /set_artraccoon_vibe, /show_artraccoon_vibe, /clear_artraccoon_vibe",
-            parse_mode="HTML",
-            reply_markup=admin_panel_menu(),
-        )
+        await call.message.edit_text("🦝 <b>ArtRaccoon Vibe</b>", parse_mode="HTML", reply_markup=admin_ar_vibe_menu())
     elif action == "nai_debug":
-        await call.message.edit_text(
-            "🧪 <b>NovelAI debug</b>\n\nКоманды: /nai_payload, /nai_payload_full, /nai_compare",
-            parse_mode="HTML",
-            reply_markup=admin_panel_menu(),
-        )
+        await call.message.edit_text("🧪 <b>NovelAI debug</b>", parse_mode="HTML", reply_markup=admin_nai_debug_menu())
     elif action == "dict":
         await call.message.edit_text("📚 <b>Dictionary</b>", parse_mode="HTML", reply_markup=dictionary_menu())
+    elif action == "purchases":
+        await call.message.edit_text("💎 <b>Покупки / генерации</b>", parse_mode="HTML", reply_markup=admin_purchases_menu())
+    elif action == "users":
+        await call.message.edit_text("👥 <b>Пользователи</b>", parse_mode="HTML", reply_markup=admin_users_menu())
+    elif action == "broadcast":
+        draft = get_config_value(f"broadcast_draft:{call.from_user.id}", "")
+        await call.message.edit_text(f"📢 <b>Рассылка</b>\n\nЧерновик: <code>{'есть' if draft else 'нет'}</code>", parse_mode="HTML", reply_markup=admin_broadcast_menu(bool(draft)))
     else:
         await call.message.edit_text("Раздел скоро добавим.", reply_markup=admin_panel_menu())
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_ar_vibe:"))
+async def cb_admin_ar_vibe(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    action = call.data.split(":", 1)[1]
+    if action == "show":
+        await call.message.edit_text(f"🦝 <b>ArtRaccoon vibe</b>\n<blockquote expandable>{html.escape(artraccoon_vibe_prompt() or '—')}</blockquote>", parse_mode="HTML", reply_markup=admin_ar_vibe_menu())
+    elif action == "set":
+        await state.set_state(GenState.waiting_ar_vibe)
+        await call.message.answer("Пришли скрытый ArtRaccoon vibe prompt.", reply_markup=admin_ar_vibe_menu())
+    elif action == "clear":
+        set_config_value("artraccoon_vibe_prompt", "")
+        await call.message.edit_text("✅ ArtRaccoon vibe очищен.", reply_markup=admin_ar_vibe_menu())
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_nai:"))
+async def cb_admin_nai(call: types.CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    action = call.data.split(":", 1)[1]
+    s = get_settings(call.from_user.id)
+    if action == "summary":
+        payload = get_last_payload(call.from_user.id) or sanitize_payload(nai.build_payload(s.last_prompt or "debug prompt", s))
+        await call.message.answer(nai_payload_summary_text(payload, s), parse_mode="HTML", reply_markup=admin_nai_debug_menu())
+    elif action == "full":
+        payload = sanitize_payload(get_last_payload(call.from_user.id) or nai.build_payload(s.last_prompt or "debug prompt", s))
+        data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        await call.message.answer_document(BufferedInputFile(data, filename="novelai_payload.json"), reply_markup=admin_nai_debug_menu())
+    elif action == "compare":
+        meta = get_last_metadata(call.from_user.id)
+        payload = sanitize_payload(get_last_payload(call.from_user.id))
+        text = "📭 Last NovelAI metadata не сохранена. Ответь /meta на файл с metadata NovelAI." if not meta else ("📭 Last bot payload не сохранён. Сгенерируй изображение или используй /nai_payload для preview." if not payload else nai_compare_summary_text(meta, payload))
+        await call.message.answer(text, parse_mode="HTML", reply_markup=admin_nai_debug_menu())
     await call.answer()
 
 @dp.callback_query(F.data.startswith("basic_defaults:"))
@@ -1083,6 +1161,154 @@ async def cb_basic_defaults(call: types.CallbackQuery):
         await call.answer()
         return
     await call.answer("Unknown action", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_purchases:"))
+async def cb_admin_purchases(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    action = call.data.split(":", 1)[1]
+    await state.update_data(admin_purchase_action=action)
+    await state.set_state(GenState.waiting_purchase_user_id)
+    await call.message.answer("Пришли user_id.", reply_markup=admin_purchases_menu())
+    await call.answer()
+
+
+@dp.message(GenState.waiting_purchase_user_id)
+async def admin_purchase_user_id(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        await message.answer("Команда не найдена.")
+        return
+    try:
+        user_id = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("Нужен числовой user_id.", reply_markup=admin_purchases_menu())
+        return
+    data = await state.get_data()
+    action = data.get("admin_purchase_action")
+    await state.update_data(admin_purchase_user_id=user_id)
+    if action in {"find", "balance"}:
+        await state.clear()
+        await message.answer(_admin_user_summary(user_id), parse_mode="HTML", reply_markup=admin_purchases_menu())
+        return
+    await state.set_state(GenState.waiting_purchase_amount)
+    await message.answer("Пришли amount числом.", reply_markup=admin_purchases_menu())
+
+
+@dp.message(GenState.waiting_purchase_amount)
+async def admin_purchase_amount(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        await message.answer("Команда не найдена.")
+        return
+    try:
+        amount = abs(int((message.text or "").strip()))
+    except ValueError:
+        await message.answer("Нужен amount числом.", reply_markup=admin_purchases_menu())
+        return
+    data = await state.get_data()
+    user_id = int(data.get("admin_purchase_user_id"))
+    delta = amount if data.get("admin_purchase_action") == "add" else -amount
+    balance = adjust_paid_generations_balance(user_id, delta)
+    await state.clear()
+    await message.answer(f"✅ Баланс пользователя <code>{user_id}</code>: <code>{balance}</code>", parse_mode="HTML", reply_markup=admin_purchases_menu())
+
+
+@dp.callback_query(F.data.startswith("admin_users:"))
+async def cb_admin_users(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    action = call.data.split(":", 1)[1]
+    if action == "recent":
+        users = load_all_users_for_admin_stats()
+        ids = list(users.keys())[-10:]
+        text = "📋 <b>Последние пользователи</b>\n" + ("\n".join(f"• <code>{html.escape(uid)}</code>" for uid in reversed(ids)) or "—")
+        await call.message.answer(text, parse_mode="HTML", reply_markup=admin_users_menu())
+    else:
+        await state.update_data(admin_user_action=action)
+        await state.set_state(GenState.waiting_admin_user_id)
+        await call.message.answer("Пришли user_id.", reply_markup=admin_users_menu())
+    await call.answer()
+
+
+@dp.message(GenState.waiting_admin_user_id)
+async def admin_user_id_answer(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        await message.answer("Команда не найдена.")
+        return
+    try:
+        user_id = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("Нужен числовой user_id.", reply_markup=admin_users_menu())
+        return
+    action = (await state.get_data()).get("admin_user_action")
+    await state.clear()
+    if action == "history":
+        text = _admin_items_text(user_id, "history", "🖼 <b>История пользователя</b>")
+    elif action == "favorites":
+        text = _admin_items_text(user_id, "favorites", "⭐ <b>Избранное пользователя</b>")
+    elif action == "clear_draft":
+        ok = clear_user_draft_for_admin(user_id)
+        text = "✅ Черновик очищен." if ok else "👤 Пользователь не найден."
+    else:
+        text = _admin_user_summary(user_id)
+    await message.answer(text, parse_mode="HTML", reply_markup=admin_users_menu())
+
+
+@dp.callback_query(F.data.startswith("admin_broadcast:"))
+async def cb_admin_broadcast(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    action = call.data.split(":", 1)[1]
+    key = f"broadcast_draft:{call.from_user.id}"
+    draft = str(get_config_value(key, "") or "")
+    if action == "write":
+        await state.set_state(GenState.waiting_broadcast_text)
+        await call.message.answer("Пришли текст рассылки.", reply_markup=admin_broadcast_menu(bool(draft)))
+    elif action == "test":
+        if not draft:
+            await call.answer("Сначала напишите сообщение", show_alert=True)
+        else:
+            await call.message.bot.send_message(call.from_user.id, draft, reply_markup=admin_broadcast_menu(True))
+    elif action == "send_all":
+        if not draft:
+            await call.answer("Сначала напишите сообщение", show_alert=True)
+        else:
+            await call.message.answer(f"Отправить рассылку всем пользователям?\nОценка: <code>{_users_count()}</code>", parse_mode="HTML", reply_markup=admin_broadcast_confirm_menu())
+    elif action == "confirm_all":
+        if not draft:
+            await call.answer("Черновик пуст", show_alert=True)
+            return
+        sent = failed = 0
+        for uid in load_all_users_for_admin_stats().keys():
+            try:
+                await call.message.bot.send_message(int(uid), draft)
+                sent += 1
+            except Exception:
+                failed += 1
+                log.exception("Broadcast failed for user %s", uid)
+        await call.message.answer(f"📢 Рассылка завершена.\n✅ Sent: <code>{sent}</code>\n❌ Failed: <code>{failed}</code>", parse_mode="HTML", reply_markup=admin_broadcast_menu(True))
+    elif action == "cancel":
+        delete_config_value(key)
+        await state.clear()
+        await call.message.answer("❌ Рассылка отменена.", reply_markup=admin_broadcast_menu(False))
+    await call.answer()
+
+
+@dp.message(GenState.waiting_broadcast_text)
+async def admin_broadcast_text(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        await message.answer("Команда не найдена.")
+        return
+    set_config_value(f"broadcast_draft:{message.from_user.id}", message.text or "")
+    await state.clear()
+    await message.answer(f"✅ Черновик сохранён.\nОценка получателей: <code>{_users_count()}</code>", parse_mode="HTML", reply_markup=admin_broadcast_menu(True))
 
 
 @dp.callback_query(F.data == "menu:main")
@@ -2121,7 +2347,7 @@ def _merge_dictionary_payload(payload: dict) -> int:
 @dp.message(Command("dict"))
 async def dict_cmd(message: types.Message):
     if not message.from_user or not _is_admin(message.from_user.id):
-        await message.answer("Только для администратора.")
+        await message.answer("Команда не найдена.")
         return
     await message.answer("📚 <b>Dictionary</b>", parse_mode="HTML", reply_markup=dictionary_menu())
 
@@ -2129,7 +2355,7 @@ async def dict_cmd(message: types.Message):
 @dp.callback_query(F.data == "dict:menu")
 async def cb_dict_menu(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     await call.message.answer("📚 <b>Dictionary</b>", parse_mode="HTML", reply_markup=dictionary_menu())
     await call.answer()
@@ -2138,7 +2364,7 @@ async def cb_dict_menu(call: types.CallbackQuery):
 @dp.callback_query(F.data == "dict:stats")
 async def cb_dict_stats(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     await call.message.answer(_dictionary_stats_text(), parse_mode="HTML", reply_markup=dictionary_menu())
     await call.answer()
@@ -2147,7 +2373,7 @@ async def cb_dict_stats(call: types.CallbackQuery):
 @dp.callback_query(F.data == "dict:pending")
 async def cb_dict_pending(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     tags = load_learned_dictionary()["pending_suggestions"]
     text = "🕓 <b>Pending candidates</b>\n" + ("\n".join(f"• {html.escape(t)}" for t in tags[:40]) or "—")
@@ -2158,7 +2384,7 @@ async def cb_dict_pending(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("dict_review:"))
 async def cb_dict_review(call: types.CallbackQuery, state: FSMContext):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     token = call.data.split(":", 1)[1]
     tags = moderation_candidates.get(token) or load_learned_dictionary()["pending_suggestions"][:20]
@@ -2174,7 +2400,7 @@ async def cb_dict_review(call: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("dict_reject:"))
 async def cb_dict_reject(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     tags = moderation_candidates.pop(call.data.split(":", 1)[1], [])
     reject_tags(tags)
@@ -2185,7 +2411,7 @@ async def cb_dict_reject(call: types.CallbackQuery):
 @dp.callback_query(F.data == "dict:reject_pending")
 async def cb_dict_reject_pending(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     tags = load_learned_dictionary()["pending_suggestions"]
     reject_tags(tags)
@@ -2196,7 +2422,7 @@ async def cb_dict_reject_pending(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("dict_one:"))
 async def cb_dict_one(call: types.CallbackQuery, state: FSMContext):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     tags = load_learned_dictionary()["pending_suggestions"]
     idx = int(call.data.split(":", 1)[1])
@@ -2233,7 +2459,7 @@ async def dict_review_answer(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "dict:add")
 async def cb_dict_add(call: types.CallbackQuery, state: FSMContext):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     await state.set_state(GenState.waiting_dict_ru)
     await call.message.answer("Введите русскую фразу")
@@ -2258,7 +2484,7 @@ async def dict_add_tags(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "dict:export")
 async def cb_dict_export(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     await call.message.answer_document(FSInputFile(DICTIONARY_PATH), caption="learned_dictionary.json")
     await call.answer()
@@ -2266,6 +2492,9 @@ async def cb_dict_export(call: types.CallbackQuery):
 
 @dp.callback_query(F.data == "dict:import")
 async def cb_dict_import_hint(call: types.CallbackQuery):
+    if not _is_admin(call.from_user.id):
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
     await call.message.answer("Пришлите JSON файлом и ответьте на него командой /dict_import.")
     await call.answer()
 
@@ -2273,7 +2502,7 @@ async def cb_dict_import_hint(call: types.CallbackQuery):
 @dp.message(Command("dict_import"))
 async def dict_import_cmd(message: types.Message):
     if not message.from_user or not _is_admin(message.from_user.id):
-        await message.answer("Только для администратора.")
+        await message.answer("Команда не найдена.")
         return
     if not message.reply_to_message or not message.reply_to_message.document:
         await message.answer("Ответьте командой /dict_import на JSON-документ.")
@@ -2293,7 +2522,7 @@ async def dict_import_cmd(message: types.Message):
 @dp.callback_query(F.data == "dict:cleanup")
 async def cb_dict_cleanup(call: types.CallbackQuery):
     if not _is_admin(call.from_user.id):
-        await call.answer("Только админ", show_alert=True)
+        await call.answer("Команда не найдена.", show_alert=True)
         return
     data = load_learned_dictionary()
     rejected = set(data["rejected_tags"])
