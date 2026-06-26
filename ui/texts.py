@@ -3,12 +3,11 @@
 import html
 from app.services.nai_client import payload_summary
 from config_defaults import QUICK_PRESETS
-from prompt_tools import has_unknown_russian
 
 
 PAID_PLACEHOLDER_TEXT = "💎 Эта функция появится в платном режиме.\nСкоро добавим покупку генераций и расширенные настройки."
 DAILY_LIMIT_TEXT = "🕯️ На сегодня бесплатные генерации закончились.\nЗавтра появятся новые 10 попыток."
-GENERATION_STARTED_TEXT = "✨ Запускаю генерацию. Енот уже смешивает пиксели..."
+GENERATION_STARTED_TEXT = "✨ Генерирую. Енот смешивает пиксели..."
 PROMPT_EMPTY_TEXT = "🖼️ Черновик пока пуст. Пришли идею картинки обычным сообщением."
 CANCEL_TEXT = "❌ Черновик очищен. Возвращаю в главное меню."
 CLEAR_TEXT = "🧹 Черновик очищен. Можно прислать новую идею."
@@ -21,13 +20,11 @@ def cooldown_text(seconds: int) -> str:
 
 def start_text(remaining: int | None, daily_limit: int, is_admin: bool = False) -> str:
     remaining_line = f"\n\nСегодня осталось: <b>{remaining}/{daily_limit}</b>." if remaining is not None else ""
-    admin_line = "\n\nАдмин-панель и специальные команды доступны как раньше." if is_admin else ""
     return (
         "🦝 <b>RaccoonNAI</b>\n\n"
         "Привет! Я помогу превратить идею в картинку.\n"
-        "Напиши промпт — покажу красивый черновик перед генерацией."
+        "Напиши промпт — покажу черновик перед генерацией."
         + remaining_line
-        + admin_line
     )
 
 
@@ -50,9 +47,11 @@ def main_menu_text() -> str:
 def prompt_request_text() -> str:
     return (
         "🎨 <b>Новый промпт</b>\n\n"
-        "Опиши картинку как тебе удобно — коротко или с деталями.\n\n"
+        "Опиши изображение.\n\n"
+        "💡 NovelAI лучше понимает английские промпты.\n\n"
         "Например:\n"
-        "<code>девушка с ушками енота, розовые глаза, древние руины</code>\n\n"
+        "<code>1girl, raccoon ears, pink eyes, ancient ruins, cinematic lighting, masterpiece</code>\n\n"
+        "Можно писать и на русском, но английский обычно даёт лучший результат.\n\n"
         "Отмена: /cancel"
     )
 
@@ -83,18 +82,19 @@ def generation_settings_summary(s) -> str:
 
 
 def prompt_preview_text(prompt: str, original: str = "", settings=None, remaining: int | None = None, daily_limit: int = 10) -> str:
-    shown_original = original.strip() if original and original.strip() else prompt.strip()
+    shown_prompt = prompt.strip()
+    shown_original = original.strip() if original and original.strip() else ""
     remaining_line = f"\n\nСегодня осталось: {remaining}/{daily_limit}" if remaining is not None else ""
-    warning_line = "\n\n⚠️ Проверь перевод." if original and has_unknown_russian(original) else ""
-    return (
-        "🦝 <b>Черновик готов</b>\n\n"
-        "<b>Ты написал:</b>\n"
-        f"<code>{html.escape(shown_original[:1400])}</code>\n\n"
-        "<b>Промпт для генерации:</b>\n"
-        f"<code>{html.escape(prompt[:3000])}</code>"
-        + warning_line
-        + remaining_line
-    )
+    if shown_original and shown_original != shown_prompt:
+        body = (
+            "<b>Ты написал:</b>\n"
+            f"<code>{html.escape(shown_original[:1400])}</code>\n\n"
+            "<b>Промпт для генерации:</b>\n"
+            f"<code>{html.escape(shown_prompt[:3000])}</code>"
+        )
+    else:
+        body = "<b>Промпт:</b>\n" f"<code>{html.escape(shown_prompt[:3000])}</code>"
+    return "🦝 <b>Черновик готов</b>\n\n" + body + remaining_line
 
 
 def presets_text() -> str:

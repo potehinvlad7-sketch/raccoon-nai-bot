@@ -51,6 +51,12 @@ def load_all() -> dict:
         return _load_all_unlocked()
 
 
+def load_all_users_for_admin_stats() -> dict:
+    """Return a read-only snapshot of all user records for admin statistics."""
+    with _STORAGE_LOCK:
+        return json.loads(json.dumps(_load_all_unlocked(), ensure_ascii=False))
+
+
 def save_all(data: dict) -> None:
     with _STORAGE_LOCK:
         _save_all_unlocked(data)

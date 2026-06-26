@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES, AELITA_DESCRIPTION, UserSettings
 from keyboards import (
     main_menu as base_main_menu, settings_menu, modes_menu, presets_menu, pending_prompt_menu,
-    after_generation_menu, generation_item_menu, artraccoon_menu, meta_import_menu, confirm_reset_menu, model_menu, size_menu, sampler_menu, uc_menu, noise_menu, seed_menu, samples_menu, moderation_dictionary_menu, dictionary_menu, dictionary_pending_menu
+    after_generation_menu, generation_item_menu, artraccoon_menu, meta_import_menu, confirm_reset_menu, model_menu, size_menu, sampler_menu, uc_menu, noise_menu, seed_menu, samples_menu, moderation_dictionary_menu, dictionary_menu, dictionary_pending_menu, admin_panel_menu
 )
 from app.services.nai_client import (
     NovelAIClient, NovelAIError, sanitize_payload,
@@ -27,13 +27,14 @@ from app.services.nai_client import (
 )
 from prompt_tools import (
     DICTIONARY_PATH, add_learned_mapping, learn_from_english_prompt,
-    load_learned_dictionary, natural_to_nai_tags, parse_english_tags, reject_tags,
+    load_learned_dictionary, parse_english_tags, reject_tags,
     looks_like_english_tags, save_learned_dictionary
 )
 from storage import (
     get_settings, save_settings, patch_settings, add_history, get_history,
     add_favorite, get_favorites, delete_favorite, set_last_metadata, get_last_metadata,
-    set_last_payload, get_last_payload, get_config_value, set_config_value, delete_config_value
+    set_last_payload, get_last_payload, get_config_value, set_config_value, delete_config_value,
+    load_all_users_for_admin_stats
 )
 
 from services.generation import (
@@ -322,11 +323,8 @@ def prompt_menu_for(s, user_id: int):
 def prepare_prompt_for_user(user_id: int, text: str, force_tags: bool = False) -> tuple[str, str]:
     s = get_settings(user_id)
     if s.artraccoon_mode:
-        character = natural_to_nai_tags(text) if force_tags else text
-        return s.artraccoon_base_prompt, character
-    converted = natural_to_nai_tags(text)
-    original = "" if converted == text and looks_like_english_tags(text) else text
-    return converted, original
+        return s.artraccoon_base_prompt, text
+    return text, ""
 
 
 async def send_last_prompt(message: types.Message, actor: types.User | None = None) -> None:
@@ -362,7 +360,6 @@ async def retry_last_prompt(message: types.Message, actor: types.User | None = N
             reply_markup=main_menu(),
         )
         return
-    await message.answer("🔁 Повторяю последний промт с текущими настройками.")
     await generate_image_from_prompt(message, s.last_prompt, actor=user)
 
 @dp.message(Command("start"))
@@ -378,11 +375,129 @@ async def start(message: types.Message):
 async def help_cmd(message: types.Message):
     await message.answer(howto_text(message.from_user.id), reply_markup=main_menu(), parse_mode="HTML")
 
-@dp.message(Command("xxx"))
-async def xxx_cmd(message: types.Message):
-    s = get_settings(message.from_user.id)
-    pro_ui = (s.pro_mode and message.from_user.id in ADMIN_IDS) or s.artraccoon_mode
-    await message.answer(settings_text(message.from_user.id), reply_markup=settings_markup_for(message.from_user.id), parse_mode="HTML")
+def admin_panel_text() -> str:
+    return "🛠 <b>Админ-панель RaccoonNAI</b>"
+
+
+def _parse_dt(raw) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def build_admin_stats() -> dict:
+    users = load_all_users_for_admin_stats()
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    week_ago = now.timestamp() - 7 * 24 * 60 * 60
+    total_generations = generations_today = free_used = 0
+    active_today: set[str] = set()
+    active_7d: set[str] = set()
+    total_paid_balance = total_favorites = total_history = 0
+    vibe_users = advanced_users = pending_drafts = 0
+    by_user: list[tuple[str, int]] = []
+    model_counts: dict[str, int] = {}
+    size_counts: dict[str, int] = {}
+    last_ts: datetime | None = None
+    for uid, raw in users.items():
+        user = raw if isinstance(raw, dict) else {}
+        history = user.get("history", []) if isinstance(user.get("history", []), list) else []
+        favorites = user.get("favorites", []) if isinstance(user.get("favorites", []), list) else []
+        count = len(history)
+        total_generations += count
+        total_history += count
+        total_favorites += len(favorites)
+        free_used += int(user.get("free_daily_used", user.get("daily_generation_count", 0)) or 0)
+        total_paid_balance += int(user.get("paid_generations_balance", 0) or 0)
+        if user.get("artraccoon_vibe_enabled"):
+            vibe_users += 1
+        if user.get("pro_mode") or user.get("artraccoon_mode") or uid.isdigit() and int(uid) in ADMIN_IDS:
+            advanced_users += 1
+        if str(user.get("pending_prompt") or "").strip():
+            pending_drafts += 1
+        by_user.append((uid, count))
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            dt = _parse_dt(item.get("timestamp"))
+            if dt:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt.date() == today:
+                    generations_today += 1
+                    active_today.add(uid)
+                if dt.timestamp() >= week_ago:
+                    active_7d.add(uid)
+                if last_ts is None or dt > last_ts:
+                    last_ts = dt
+            model = str(item.get("model") or "").strip()
+            size = str(item.get("size") or "").strip()
+            if model:
+                model_counts[model] = model_counts.get(model, 0) + 1
+            if size:
+                size_counts[size] = size_counts.get(size, 0) + 1
+    total_users = len(users)
+    return {
+        "total_users": total_users, "total_generations": total_generations, "generations_today": generations_today,
+        "active_today": len(active_today), "active_7d": len(active_7d), "free_used": free_used,
+        "paid_used": None, "paid_balance": total_paid_balance, "vibe_users": vibe_users, "advanced_users": advanced_users,
+        "pending_drafts": pending_drafts, "favorites": total_favorites, "history": total_history,
+        "avg": total_generations / total_users if total_users else 0,
+        "top_users": sorted(by_user, key=lambda x: x[1], reverse=True)[:10],
+        "top_models": sorted(model_counts.items(), key=lambda x: x[1], reverse=True)[:5],
+        "top_sizes": sorted(size_counts.items(), key=lambda x: x[1], reverse=True)[:5],
+        "last_ts": last_ts.isoformat() if last_ts else "—",
+    }
+
+
+def format_admin_stats(stats: dict) -> str:
+    top_users = "\n".join(f"• <code>{html.escape(uid)}</code> — {count}" for uid, count in stats["top_users"] if count) or "—"
+    top_models = "\n".join(f"• <code>{html.escape(k)}</code> — {v}" for k, v in stats["top_models"]) or "—"
+    top_sizes = "\n".join(f"• <code>{html.escape(k)}</code> — {v}" for k, v in stats["top_sizes"]) or "—"
+    return (
+        "📊 <b>Статистика RaccoonNAI</b>\n\n"
+        f"👥 Total users: <code>{stats['total_users']}</code>\n"
+        f"🖼 Total generations: <code>{stats['total_generations']}</code>\n"
+        f"📅 Generations today: <code>{stats['generations_today']}</code>\n"
+        f"🔥 Active users today: <code>{stats['active_today']}</code>\n"
+        f"📈 Active users last 7 days: <code>{stats['active_7d']}</code>\n"
+        f"🎁 Free generations used: <code>{stats['free_used']}</code>\n"
+        "💎 Paid generations used: <code>not implemented</code>\n"
+        f"📦 Total remaining paid generation balance: <code>{stats['paid_balance']}</code>\n"
+        f"🦝 Users with ArtRaccoon Vibe enabled: <code>{stats['vibe_users']}</code>\n"
+        f"⚙️ Users with advanced/admin mode enabled: <code>{stats['advanced_users']}</code>\n"
+        f"🧪 Users with saved pending drafts: <code>{stats['pending_drafts']}</code>\n"
+        f"⭐ Total favorites: <code>{stats['favorites']}</code>\n"
+        f"🕘 Total history items: <code>{stats['history']}</code>\n"
+        f"📊 Average generations per user: <code>{stats['avg']:.2f}</code>\n"
+        f"🕒 Last generation timestamp: <code>{html.escape(stats['last_ts'])}</code>\n\n"
+        f"<b>Top 10 users by generations</b>\n{top_users}\n\n"
+        f"<b>Top models used</b>\n{top_models}\n\n"
+        f"<b>Top sizes used</b>\n{top_sizes}"
+    )
+
+
+async def show_admin_panel(message: types.Message) -> None:
+    if not message.from_user or message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    await message.answer(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_menu())
+
+
+@dp.message(Command("admin", "xxx"))
+async def admin_cmd(message: types.Message):
+    await show_admin_panel(message)
+
+
+@dp.message(Command("admin_stats"))
+async def admin_stats_cmd(message: types.Message):
+    if not message.from_user or message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    await message.answer(format_admin_stats(build_admin_stats()), parse_mode="HTML", reply_markup=admin_panel_menu())
 
 @dp.message(Command("meta"))
 async def meta_cmd(message: types.Message):
@@ -906,6 +1021,38 @@ async def draw_cmd(message: types.Message):
         prompt = s.artraccoon_base_prompt
     await generate_image_from_prompt(message, prompt)
 
+
+@dp.callback_query(F.data.startswith("admin:"))
+async def cb_admin_panel(call: types.CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    action = call.data.split(":", 1)[1]
+    if action == "stats":
+        await call.message.edit_text(format_admin_stats(build_admin_stats()), parse_mode="HTML", reply_markup=admin_panel_menu())
+    elif action == "basic_defaults":
+        await call.message.edit_text(basic_defaults_text(), parse_mode="HTML", reply_markup=basic_defaults_menu())
+    elif action == "ar_vibe":
+        vibe = artraccoon_vibe_prompt() or "—"
+        await call.message.edit_text(
+            "🦝 <b>ArtRaccoon Vibe</b>\n\n"
+            f"Текущий скрытый Vibe:\n<code>{html.escape(vibe[:3000])}</code>\n\n"
+            "Команды: /set_artraccoon_vibe, /show_artraccoon_vibe, /clear_artraccoon_vibe",
+            parse_mode="HTML",
+            reply_markup=admin_panel_menu(),
+        )
+    elif action == "nai_debug":
+        await call.message.edit_text(
+            "🧪 <b>NovelAI debug</b>\n\nКоманды: /nai_payload, /nai_payload_full, /nai_compare",
+            parse_mode="HTML",
+            reply_markup=admin_panel_menu(),
+        )
+    elif action == "dict":
+        await call.message.edit_text("📚 <b>Dictionary</b>", parse_mode="HTML", reply_markup=dictionary_menu())
+    else:
+        await call.message.edit_text("Раздел скоро добавим.", reply_markup=admin_panel_menu())
+    await call.answer()
+
 @dp.callback_query(F.data.startswith("basic_defaults:"))
 async def cb_basic_defaults(call: types.CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
@@ -1341,7 +1488,7 @@ def transform_prompt(prompt: str, tool: str) -> str:
                 parts.append(part)
         return ", ".join(parts)
     if tool == "translate":
-        return natural_to_nai_tags(prompt)
+        return prompt
     additions = {
         "improve": "strong composition, expressive lighting, detailed background, cohesive color palette, sharp focus",
         "raccoon": "ArtRaccoon vibe, cozy mischievous raccoon energy, warm cinematic light, whimsical details",
@@ -1437,12 +1584,11 @@ async def cb_prompt_tool(call: types.CallbackQuery):
     if not s.pending_prompt.strip():
         await call.answer("Сначала пришли промт", show_alert=True)
         return
-    source = s.pending_original_prompt or s.pending_prompt
-    if tool == "translate" and s.artraccoon_mode:
-        prompt, original = prepare_prompt_for_user(call.from_user.id, source, force_tags=True)
-    else:
-        prompt = transform_prompt(source if tool == "translate" else s.pending_prompt, tool)
-        original = source if tool == "translate" else s.pending_original_prompt
+    if tool == "translate":
+        await call.answer("Переводчик временно отключён.", show_alert=True)
+        return
+    prompt = transform_prompt(s.pending_prompt, tool)
+    original = s.pending_original_prompt
     updates = {"pending_prompt": prompt, "pending_original_prompt": original}
     if s.artraccoon_mode:
         updates["artraccoon_character_prompt"] = original
