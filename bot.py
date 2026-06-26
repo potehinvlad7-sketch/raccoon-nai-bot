@@ -8,7 +8,7 @@ from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
 
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -35,7 +35,7 @@ from storage import (
     get_settings, save_settings, patch_settings, add_history, get_history,
     add_favorite, get_favorites, delete_favorite, set_last_metadata, get_last_metadata,
     set_last_payload, get_last_payload, get_config_value, set_config_value, delete_config_value,
-    load_all_users_for_admin_stats, get_user_record_for_admin, adjust_paid_generations_balance, clear_user_draft_for_admin
+    load_all_users_for_admin_stats, get_user_record_for_admin, adjust_paid_generations_balance, clear_user_draft_for_admin, update_user_identity
 )
 
 from services.generation import (
@@ -73,6 +73,17 @@ log = logging.getLogger("novelai_tg_bot")
 
 bot: Bot | None = None
 dp = Dispatcher()
+
+
+class UserIdentityMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        update_user_identity(user)
+        return await handler(event, data)
+
+
+dp.message.middleware(UserIdentityMiddleware())
+dp.callback_query.middleware(UserIdentityMiddleware())
 nai = NovelAIClient(NOVELAI_TOKEN, default_model=NAI_MODEL, proxy_url=PROXY_URL)
 
 
@@ -132,21 +143,39 @@ def main_menu():
 
 def basic_defaults_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💾 Save my current settings as basic defaults", callback_data="basic_defaults:save")],
-        [InlineKeyboardButton(text="👁 Show basic defaults", callback_data="basic_defaults:show")],
-        [InlineKeyboardButton(text="♻ Reset basic defaults to safe factory", callback_data="basic_defaults:reset")],
-        [InlineKeyboardButton(text="🧪 Test basic defaults", callback_data="basic_defaults:test")],
+        [InlineKeyboardButton(text="💾 Сохранить мои настройки", callback_data="basic_defaults:save")],
+        [InlineKeyboardButton(text="👁 Показать подробно", callback_data="basic_defaults:show")],
+        [InlineKeyboardButton(text="♻️ Сбросить", callback_data="basic_defaults:reset")],
+        [InlineKeyboardButton(text="🧪 Тест", callback_data="basic_defaults:test")],
         [InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="admin:menu")],
-        [InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:main")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")],
     ])
 
 
 def basic_defaults_text(defaults: dict | None = None, *, saved: bool | None = None) -> str:
     defaults = sanitize_basic_defaults(defaults if defaults is not None else get_config_value("basic_generation_defaults", None), clamp_steps=True)
+    negative = "задан" if str(defaults.get("negative_prompt") or "").strip() else "пусто"
+    return (
+        "⚙️ <b>Дефолты обычного режима</b>\n\n"
+        "Эти настройки будут использоваться у всех обычных пользователей.\n\n"
+        f"🧠 Модель: {html.escape(str(defaults['model_name']))}\n"
+        f"📐 Размер: {defaults['width']}×{defaults['height']}\n"
+        f"👣 Шаги: {defaults['steps']}\n"
+        f"🧲 CFG: {defaults['scale']}\n"
+        "🎲 Seed: случайный\n"
+        f"🧪 Sampler: {html.escape(str(defaults['sampler']))}\n"
+        f"🧯 Негатив: {negative}\n"
+        f"✨ Quality tags: {'ВКЛ' if defaults['add_quality_tags'] else 'ВЫКЛ'}\n"
+        f"🦝 Variety+: {'ВКЛ' if defaults['variety_plus'] else 'ВЫКЛ'}"
+    )
+
+
+def basic_defaults_details_text(defaults: dict | None = None, *, saved: bool | None = None) -> str:
+    defaults = sanitize_basic_defaults(defaults if defaults is not None else get_config_value("basic_generation_defaults", None), clamp_steps=True)
     if saved is None:
         saved = isinstance(get_config_value("basic_generation_defaults", None), dict)
     return (
-        "🧰 <b>Public/basic defaults</b>\n"
+        "🧰 <b>Технические значения дефолтов</b>\n"
         f"Source: <code>{'saved config' if saved else 'factory defaults'}</code>\n\n"
         f"model_name: <code>{html.escape(str(defaults['model_name']))}</code>\n"
         f"size: <code>{defaults['width']}x{defaults['height']}</code>\n"
@@ -162,7 +191,6 @@ def basic_defaults_text(defaults: dict | None = None, *, saved: bool | None = No
         "n_samples: <code>1 (forced)</code>\n"
         "seed: <code>random (-1)</code>"
     )
-
 
 def settings_from_basic_defaults() -> UserSettings:
     base = UserSettings()
@@ -206,13 +234,9 @@ def art_prompt_preview_text(s) -> str:
 
 
 def user_label(user: types.User) -> str:
-    parts = [f"id={user.id}"]
-    if user.username:
-        parts.append(f"@{user.username}")
-    name = " ".join(x for x in [user.first_name, user.last_name] if x)
-    if name:
-        parts.append(name)
-    return " / ".join(parts)
+    username = f"@{user.username}" if user.username else "@-"
+    name = " ".join(x for x in [user.first_name, user.last_name] if x) or "-"
+    return f"id={user.id} / {username} / {name}"
 
 def _blockquote(text: str, limit: int = 3500) -> str:
     safe = html.escape((text or "—")[:limit])
@@ -447,7 +471,7 @@ def build_admin_stats() -> dict:
                 size_counts[size] = size_counts.get(size, 0) + 1
     total_users = len(users)
     return {
-        "total_users": total_users, "total_generations": total_generations, "generations_today": generations_today,
+        "total_users": total_users, "users_with_username": sum(1 for raw in users.values() if isinstance(raw, dict) and str(raw.get("username") or "").strip()), "users_without_username": sum(1 for raw in users.values() if not (isinstance(raw, dict) and str(raw.get("username") or "").strip())), "total_generations": total_generations, "generations_today": generations_today,
         "active_today": len(active_today), "active_7d": len(active_7d), "free_used": free_used,
         "paid_used": None, "paid_balance": total_paid_balance, "vibe_users": vibe_users, "advanced_users": advanced_users,
         "pending_drafts": pending_drafts, "favorites": total_favorites, "history": total_history,
@@ -466,6 +490,8 @@ def format_admin_stats(stats: dict) -> str:
     return (
         "📊 <b>Статистика RaccoonNAI</b>\n\n"
         f"👥 Total users: <code>{stats['total_users']}</code>\n"
+        f"🔗 Users with username: <code>{stats['users_with_username']}</code>\n"
+        f"🚫 Users without username: <code>{stats['users_without_username']}</code>\n"
         f"🖼 Total generations: <code>{stats['total_generations']}</code>\n"
         f"📅 Generations today: <code>{stats['generations_today']}</code>\n"
         f"🔥 Active users today: <code>{stats['active_today']}</code>\n"
@@ -565,7 +591,7 @@ async def basic_defaults_show_cmd(message: types.Message):
         await message.answer("Команда не найдена.")
         return
     raw = get_config_value("basic_generation_defaults", None)
-    prefix = "" if isinstance(raw, dict) else "ℹ️ Saved defaults not found; factory defaults are being used.\n\n"
+    prefix = "" if isinstance(raw, dict) else "ℹ️ Сохранённые дефолты не найдены; используются заводские.\n\n"
     await message.answer(prefix + basic_defaults_text(raw, saved=isinstance(raw, dict)), parse_mode="HTML", reply_markup=basic_defaults_menu())
 
 
@@ -1031,18 +1057,73 @@ async def draw_cmd(message: types.Message):
     await generate_image_from_prompt(message, prompt)
 
 
+
+def _admin_identity_line(user_id: str, raw: dict) -> str:
+    username = str(raw.get("username") or "").strip()
+    full_name = str(raw.get("full_name") or "").strip()
+    if not full_name:
+        full_name = " ".join(str(raw.get(k) or "").strip() for k in ("first_name", "last_name")).strip()
+    return f"👤 id={html.escape(str(raw.get('id') or user_id))} / @{html.escape(username) if username else '-'} / {html.escape(full_name) if full_name else '-'}"
+
+
+def _sorted_admin_users() -> list[tuple[str, dict]]:
+    users = load_all_users_for_admin_stats()
+    def sort_key(item):
+        uid, raw = item
+        if not isinstance(raw, dict):
+            raw = {}
+        seen = str(raw.get("last_seen_at") or "")
+        return (seen, int(uid) if str(uid).isdigit() else 0)
+    normalized = [(uid, raw if isinstance(raw, dict) else {}) for uid, raw in users.items()]
+    return sorted(normalized, key=sort_key, reverse=True)
+
+
+def admin_users_page_menu(page: int, total_pages: int) -> InlineKeyboardMarkup:
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_users:all:{page - 1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(text="▶️ Далее", callback_data=f"admin_users:all:{page + 1}"))
+    keyboard = []
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def admin_users_page_text(page: int, per_page: int = 20) -> tuple[str, InlineKeyboardMarkup]:
+    users = _sorted_admin_users()
+    total = len(users)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    chunk = users[page * per_page:(page + 1) * per_page]
+    lines = [_admin_identity_line(uid, raw) for uid, raw in chunk]
+    text = f"👥 <b>Все пользователи</b>\nСтраница <code>{page + 1}/{total_pages}</code> · всего: <code>{total}</code>\n\n" + ("\n".join(lines) or "—")
+    return text, admin_users_page_menu(page, total_pages)
+
 def _admin_user_summary(user_id: int) -> str:
     raw = get_user_record_for_admin(user_id)
     if not raw:
         return f"👤 Пользователь <code>{user_id}</code> не найден."
-    safe = {k: v for k, v in raw.items() if k != "last_nai_payload"}
+    history = raw.get("history", []) if isinstance(raw.get("history"), list) else []
+    favorites = raw.get("favorites", []) if isinstance(raw.get("favorites"), list) else []
+    username = str(raw.get("username") or "").strip() or "-"
+    full_name = str(raw.get("full_name") or "").strip()
+    if not full_name:
+        full_name = " ".join(str(raw.get(k) or "").strip() for k in ("first_name", "last_name")).strip() or "-"
+    daily = int(raw.get("free_daily_used", raw.get("daily_generation_count", 0)) or 0)
     return (
-        f"👤 <b>User</b> <code>{user_id}</code>\n"
+        f"👤 <b>Пользователь</b>\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"🔗 Username: <code>@{html.escape(username) if username != '-' else '-'}</code>\n"
+        f"👤 Full name: <code>{html.escape(full_name)}</code>\n"
         f"💎 Balance: <code>{int(raw.get('paid_generations_balance', 0) or 0)}</code>\n"
-        f"🖼 History: <code>{len(raw.get('history', []) if isinstance(raw.get('history'), list) else [])}</code>\n"
-        f"⭐ Favorites: <code>{len(raw.get('favorites', []) if isinstance(raw.get('favorites'), list) else [])}</code>\n"
-        f"🧹 Draft: <code>{bool(str(raw.get('pending_prompt') or '').strip())}</code>\n\n"
-        f"<pre>{html.escape(json.dumps(safe, ensure_ascii=False, indent=2)[:3000])}</pre>"
+        f"🖼 Total generations: <code>{len(history)}</code>\n"
+        f"📅 Daily usage: <code>{daily}</code>\n"
+        f"📚 History count: <code>{len(history)}</code>\n"
+        f"⭐ Favorites count: <code>{len(favorites)}</code>\n"
+        f"🦝 ArtRaccoon vibe enabled: <code>{bool(raw.get('artraccoon_vibe_enabled'))}</code>\n"
+        f"🕘 Last seen: <code>{html.escape(str(raw.get('last_seen_at') or '—'))}</code>"
     )
 
 
@@ -1140,24 +1221,24 @@ async def cb_basic_defaults(call: types.CallbackQuery):
     if action == "save":
         defaults = basic_defaults_from_settings(get_settings(call.from_user.id))
         set_config_value("basic_generation_defaults", defaults)
-        await call.message.edit_text("✅ Saved current safe generation subset as public/basic defaults.\n\n" + basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
-        await call.answer("Saved")
+        await call.message.edit_text("✅ Настройки сохранены.\n\n" + basic_defaults_text(defaults, saved=True), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        await call.answer("Сохранено")
         return
     if action == "show":
         raw = get_config_value("basic_generation_defaults", None)
-        prefix = "" if isinstance(raw, dict) else "ℹ️ Saved defaults not found; factory defaults are being used.\n\n"
-        await call.message.edit_text(prefix + basic_defaults_text(raw, saved=isinstance(raw, dict)), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        prefix = "" if isinstance(raw, dict) else "ℹ️ Сохранённые дефолты не найдены; используются заводские.\n\n"
+        await call.message.edit_text(prefix + basic_defaults_details_text(raw, saved=isinstance(raw, dict)), parse_mode="HTML", reply_markup=basic_defaults_menu())
         await call.answer()
         return
     if action == "reset":
         delete_config_value("basic_generation_defaults")
-        await call.message.edit_text("♻ Basic defaults reset. Factory defaults now apply.\n\n" + basic_defaults_text(factory_basic_defaults(), saved=False), parse_mode="HTML", reply_markup=basic_defaults_menu())
-        await call.answer("Reset")
+        await call.message.edit_text("♻️ Дефолты сброшены.\n\n" + basic_defaults_text(factory_basic_defaults(), saved=False), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        await call.answer("Сброшено")
         return
     if action == "test":
         test_settings = settings_from_basic_defaults()
         payload = sanitize_payload(nai.build_payload("test prompt", test_settings))
-        await call.message.edit_text("🧪 <b>Basic defaults test payload</b>\nPrompt: <code>test prompt</code>\n\n" + nai_payload_summary_text(payload, test_settings), parse_mode="HTML", reply_markup=basic_defaults_menu())
+        await call.message.edit_text("🧪 <b>Тестовый payload дефолтов</b>\nPrompt: <code>test prompt</code>\n\n" + nai_payload_summary_text(payload, test_settings), parse_mode="HTML", reply_markup=basic_defaults_menu())
         await call.answer()
         return
     await call.answer("Unknown action", show_alert=True)
@@ -1222,11 +1303,11 @@ async def cb_admin_users(call: types.CallbackQuery, state: FSMContext):
         await call.answer("Команда не найдена.", show_alert=True)
         return
     action = call.data.split(":", 1)[1]
-    if action == "recent":
-        users = load_all_users_for_admin_stats()
-        ids = list(users.keys())[-10:]
-        text = "📋 <b>Последние пользователи</b>\n" + ("\n".join(f"• <code>{html.escape(uid)}</code>" for uid in reversed(ids)) or "—")
-        await call.message.answer(text, parse_mode="HTML", reply_markup=admin_users_menu())
+    if action.startswith("all"):
+        parts = call.data.split(":")
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        text, markup = admin_users_page_text(page)
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
     else:
         await state.update_data(admin_user_action=action)
         await state.set_state(GenState.waiting_admin_user_id)
