@@ -3,6 +3,7 @@ import os
 import threading
 from pathlib import Path
 from config_defaults import UserSettings
+from datetime import datetime, timezone
 
 DATA_DIR = Path("data")
 USERS_FILE = DATA_DIR / "users.json"
@@ -45,6 +46,30 @@ def _default_user(raw: dict | None = None) -> dict:
                 defaults[key] = raw[key]
     return defaults
 
+
+
+def update_user_identity(user) -> None:
+    """Store the latest Telegram identity fields for a user interaction."""
+    if user is None or not getattr(user, "id", None):
+        return
+    first_name = getattr(user, "first_name", None) or ""
+    last_name = getattr(user, "last_name", None) or ""
+    full_name = " ".join(part for part in (first_name, last_name) if part).strip()
+    if not full_name:
+        full_name = getattr(user, "full_name", "") or ""
+    with _STORAGE_LOCK:
+        data = _load_all_unlocked()
+        key = str(user.id)
+        record = data.setdefault(key, _default_user())
+        record.update({
+            "id": int(user.id),
+            "username": getattr(user, "username", None) or "",
+            "first_name": first_name,
+            "last_name": last_name,
+            "full_name": full_name,
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _save_all_unlocked(data)
 
 def load_all() -> dict:
     with _STORAGE_LOCK:
