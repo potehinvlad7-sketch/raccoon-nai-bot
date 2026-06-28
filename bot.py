@@ -17,11 +17,11 @@ from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, 
 from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 
-from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES, AELITA_DESCRIPTION, UserSettings
+from config_defaults import QUICK_PRESETS, RESOLUTIONS, MODELS, SAMPLERS, UC_PRESETS, NOISE_SCHEDULES, AELITA_DESCRIPTION, UserSettings, MAX_EXTRA_CHARACTERS
 from keyboards import (
     main_menu as base_main_menu, settings_menu, modes_menu, presets_menu, pending_prompt_menu,
     after_generation_menu, generation_item_menu, artraccoon_menu, meta_import_menu, confirm_reset_menu, model_menu, size_menu, sampler_menu, uc_menu, noise_menu, seed_menu, samples_menu, moderation_dictionary_menu, dictionary_menu, dictionary_pending_menu, admin_panel_menu,
-    admin_ar_vibe_menu, admin_nai_debug_menu, admin_site_clone_menu, registry_fields_text, admin_purchases_menu, admin_users_menu, admin_broadcast_menu, admin_broadcast_confirm_menu,
+    admin_ar_vibe_menu, admin_nai_debug_menu, admin_site_clone_menu, registry_fields_text, admin_purchases_menu, admin_users_menu, admin_broadcast_menu, admin_broadcast_confirm_menu, characters_menu,
 )
 from app.services.nai_client import (
     NovelAIClient, NovelAIError, sanitize_payload,
@@ -142,6 +142,9 @@ class GenState(StatesGroup):
     waiting_basic_steps = State()
     waiting_basic_cfg = State()
     waiting_basic_negative = State()
+    waiting_char_prompt = State()
+    waiting_char_uc = State()
+    waiting_char_position = State()
 
 def main_menu():
     return base_main_menu(CHANNEL_URL)
@@ -788,6 +791,9 @@ async def ar_show_payload_cmd(message: types.Message):
 
 @dp.message(Command("raw"))
 async def raw_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
     s = get_settings(message.from_user.id)
     await message.answer(f"<pre>{s.to_dict()}</pre>", parse_mode="HTML")
 
@@ -949,24 +955,27 @@ async def generate_image_from_prompt(
     if generation_lock.locked() or generation_waiting:
         await message.answer(f"⏳ Генерация поставлена в очередь. Перед тобой: {generation_waiting}")
     generation_waiting += 1
+    counted = True
     wait = await message.answer(GENERATION_STARTED_TEXT)
 
     image_bytes = None
-    if is_advanced_user(user_id) and s.pending_image_path and Path(s.pending_image_path).exists():
-        image_bytes = Path(s.pending_image_path).read_bytes()
-    elif is_advanced_user(user_id) and message.reply_to_message and message.reply_to_message.photo:
-        photo = message.reply_to_message.photo[-1]
-        file = await message.bot.get_file(photo.file_id)
-        bio = BytesIO()
-        await message.bot.download_file(file.file_path, destination=bio)
-        image_bytes = bio.getvalue()
 
     async def show_character_payload_fallback() -> None:
         await wait.edit_text("NovelAI не принял Character Payload, пробую fallback-сборку.")
 
     try:
+        if is_advanced_user(user_id) and s.pending_image_path and Path(s.pending_image_path).exists():
+            image_bytes = Path(s.pending_image_path).read_bytes()
+        elif is_advanced_user(user_id) and message.reply_to_message and message.reply_to_message.photo:
+            photo = message.reply_to_message.photo[-1]
+            file = await message.bot.get_file(photo.file_id)
+            bio = BytesIO()
+            await message.bot.download_file(file.file_path, destination=bio)
+            image_bytes = bio.getvalue()
+
         async with generation_lock:
             generation_waiting = max(0, generation_waiting - 1)
+            counted = False
             mark_generation_started(user_id)
             candidates = learn_from_english_prompt(visible_prompt) if looks_like_english_tags(visible_prompt) else []
             await send_moderation_copy(message.bot, user, original_prompt, final_prompt, s, candidates, hidden_vibe_applied)
@@ -1036,6 +1045,9 @@ async def generate_image_from_prompt(
             "❌ Внутренняя ошибка бота. Попробуй позже или измени промт.",
             reply_markup=main_menu(),
         )
+    finally:
+        if counted:
+            generation_waiting = max(0, generation_waiting - 1)
 
 
 @dp.message(Command("gen"))
@@ -1234,6 +1246,125 @@ def _users_count() -> int:
     return len(load_all_users_for_admin_stats())
 
 
+def _normalized_extra_characters(settings: UserSettings) -> list[dict]:
+    chars = settings.extra_characters if isinstance(settings.extra_characters, list) else []
+    normalized = []
+    for item in chars[:MAX_EXTRA_CHARACTERS]:
+        if not isinstance(item, dict):
+            continue
+        normalized.append({
+            "prompt": str(item.get("prompt") or "").strip(),
+            "uc": str(item.get("uc") or "").strip(),
+            "position": str(item.get("position") or "").strip(),
+        })
+    return normalized
+
+
+def _characters_text(characters: list[dict]) -> str:
+    lines = ["👥 <b>Character+</b>", "Admin-only multi-character captions for NovelAI V4/V4.5."]
+    if not characters:
+        lines.append("\nПока дополнительных персонажей нет.")
+    else:
+        lines.append(f"\nПерсонажей: <code>{len(characters)}/{MAX_EXTRA_CHARACTERS}</code>")
+        for idx, ch in enumerate(characters, start=1):
+            lines.extend([
+                f"\n<b>{idx}.</b>",
+                f"Prompt: <blockquote expandable>{html.escape(ch.get('prompt') or '—')}</blockquote>",
+                f"UC: <blockquote expandable>{html.escape(ch.get('uc') or '—')}</blockquote>",
+                f"Position: <code>{html.escape(ch.get('position') or '—')}</code>",
+            ])
+    return "\n".join(lines)
+
+
+async def show_characters_panel(message: types.Message, user_id: int, *, edit: bool = False) -> None:
+    chars = _normalized_extra_characters(get_settings(user_id))
+    text = _characters_text(chars)
+    markup = characters_menu(chars)
+    if edit:
+        await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    else:
+        await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@dp.message(Command("characters", "char"))
+async def characters_cmd(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        return
+    await show_characters_panel(message, message.from_user.id)
+
+
+@dp.callback_query(F.data.startswith("char:"))
+async def cb_characters(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    action = call.data.split(":", 2)[1]
+    settings = get_settings(call.from_user.id)
+    chars = _normalized_extra_characters(settings)
+    if action == "menu":
+        await show_characters_panel(call.message, call.from_user.id, edit=True)
+    elif action == "add":
+        if len(chars) >= MAX_EXTRA_CHARACTERS:
+            await call.answer("Достигнут лимит Character+", show_alert=True)
+            return
+        await state.set_state(GenState.waiting_char_prompt)
+        await call.message.answer("Пришли prompt дополнительного персонажа.", reply_markup=characters_menu(chars))
+    elif action == "show":
+        await call.message.answer(_characters_text(chars), parse_mode="HTML", reply_markup=characters_menu(chars))
+    elif action == "delete":
+        idx = int(call.data.split(":", 2)[2])
+        if 0 <= idx < len(chars):
+            chars.pop(idx)
+            patch_settings(call.from_user.id, extra_characters=chars)
+            await call.message.edit_text(_characters_text(chars), parse_mode="HTML", reply_markup=characters_menu(chars))
+        else:
+            await call.answer("Персонаж не найден", show_alert=True)
+    elif action == "clear":
+        patch_settings(call.from_user.id, extra_characters=[])
+        await call.message.edit_text(_characters_text([]), parse_mode="HTML", reply_markup=characters_menu([]))
+    await call.answer()
+
+
+@dp.message(GenState.waiting_char_prompt)
+async def char_prompt_input(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        await state.clear()
+        return
+    await state.update_data(char_prompt=(message.text or "").strip())
+    await state.set_state(GenState.waiting_char_uc)
+    await message.answer("Пришли UC/negative для персонажа (или '-' чтобы оставить пустым).")
+
+
+@dp.message(GenState.waiting_char_uc)
+async def char_uc_input(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    await state.update_data(char_uc="" if raw == "-" else raw)
+    await state.set_state(GenState.waiting_char_position)
+    await message.answer("Пришли position (например left/center/right) или '-' чтобы оставить пустым.")
+
+
+@dp.message(GenState.waiting_char_position)
+async def char_position_input(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Команда не найдена.")
+        await state.clear()
+        return
+    data = await state.get_data()
+    position = (message.text or "").strip()
+    item = {"prompt": data.get("char_prompt", ""), "uc": data.get("char_uc", ""), "position": "" if position == "-" else position}
+    chars = _normalized_extra_characters(get_settings(message.from_user.id))
+    if item["prompt"] and len(chars) < MAX_EXTRA_CHARACTERS:
+        chars.append(item)
+        patch_settings(message.from_user.id, extra_characters=chars)
+    await state.clear()
+    await message.answer("✅ Character+ персонаж сохранён.", reply_markup=characters_menu(chars))
+
 @dp.callback_query(F.data.startswith("admin:"))
 async def cb_admin_panel(call: types.CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
@@ -1250,6 +1381,8 @@ async def cb_admin_panel(call: types.CallbackQuery):
         await call.message.edit_text("🦝 <b>ArtRaccoon Vibe</b>", parse_mode="HTML", reply_markup=admin_ar_vibe_menu())
     elif action == "nai_debug":
         await call.message.edit_text("🧪 <b>NovelAI debug</b>", parse_mode="HTML", reply_markup=admin_nai_debug_menu())
+    elif action == "characters":
+        await show_characters_panel(call.message, call.from_user.id, edit=True)
     elif action == "dict":
         await call.message.edit_text("📚 <b>Dictionary</b>", parse_mode="HTML", reply_markup=dictionary_menu())
     elif action == "purchases":
@@ -1309,7 +1442,7 @@ async def cb_admin_nai(call: types.CallbackQuery):
         if not meta:
             await call.answer("Metadata не найдена", show_alert=True)
             return
-        updates = metadata_settings_updates(meta)
+        updates = metadata_settings_updates(meta, admin=True)
         if not updates:
             await call.answer("В metadata нет известных website settings", show_alert=True)
             return
@@ -2140,10 +2273,16 @@ async def cb_prompt_tool(call: types.CallbackQuery):
     await call.message.edit_text(preview, parse_mode="HTML", reply_markup=prompt_menu_for(s, call.from_user.id))
     await call.answer("Промт обновлён")
 
-def metadata_settings_updates(meta: dict) -> dict:
-    # Admin/site-clone import intentionally uses the full registry. Basic mode
-    # remains limited elsewhere by safe_generation_defaults/sanitize_basic_defaults.
-    return settings_updates_from_metadata(meta, include_admin=True)
+def metadata_settings_updates(meta: dict, *, admin: bool = False) -> dict:
+    updates = settings_updates_from_metadata(meta, include_admin=admin)
+    if not admin:
+        action = str(updates.get("nai_action") or "").strip()
+        if action and action != "generate":
+            updates.pop("nai_action", None)
+        updates.pop("upscale_action", None)
+        updates.pop("variation_action", None)
+        updates.pop("infill_mask", None)
+    return updates
 
 @dp.callback_query(F.data.startswith("meta:"))
 async def cb_meta_apply(call: types.CallbackQuery):
@@ -2179,7 +2318,7 @@ async def cb_meta_apply(call: types.CallbackQuery):
         else:
             updates["negative_prompt"] = str(meta["negative_prompt"])
     if action in {"settings", "all"}:
-        updates.update(metadata_settings_updates(meta))
+        updates.update(metadata_settings_updates(meta, admin=call.from_user.id in ADMIN_IDS))
     if not updates:
         await call.answer("В metadata нет подходящих полей для этого действия", show_alert=True)
         return

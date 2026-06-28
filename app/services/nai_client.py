@@ -32,6 +32,19 @@ def _character_caption(prompt: str, position: str = "") -> dict:
         caption["position"] = pos
     return caption
 
+def _extra_characters(settings: UserSettings) -> list[dict]:
+    items = settings.extra_characters if isinstance(settings.extra_characters, list) else []
+    chars = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        prompt = str(item.get("prompt") or "").strip()
+        uc = str(item.get("uc") or "").strip()
+        position = str(item.get("position") or "").strip()
+        if prompt or uc:
+            chars.append({"prompt": prompt, "uc": uc, "position": position})
+    return chars
+
 def sanitize_payload(payload: dict) -> dict:
     """Return a deep-copied payload with any accidental secret-like fields removed."""
     def clean(value):
@@ -133,10 +146,11 @@ class NovelAIClient:
             settings.artraccoon_character_uc.strip()
             or settings.artraccoon_character_negative.strip()
         ) if settings.artraccoon_mode else ""
+        extra_characters = _extra_characters(settings)
+        has_any_character = bool(character_prompt or any(ch["prompt"] for ch in extra_characters))
         has_character_payload = bool(
-            settings.artraccoon_mode
-            and is_v4_model
-            and character_prompt
+            is_v4_model
+            and has_any_character
             and not settings.artraccoon_force_concat
             and not force_character_concat
         )
@@ -146,13 +160,20 @@ class NovelAIClient:
             uc_parts.append(settings.artraccoon_base_uc)
             if not has_character_payload:
                 uc_parts.append(character_uc)
+        if not has_character_payload:
+            uc_parts.extend(ch["uc"] for ch in extra_characters)
         if settings.negative_prompt.strip():
             uc_parts.append(settings.negative_prompt.strip())
         uc = _join_prompt_parts(uc_parts)
 
         prompt_for_payload = prompt
+        concat_character_prompts = []
         if settings.artraccoon_mode and character_prompt and not has_character_payload:
-            prompt_for_payload = _join_prompt_parts([prompt, character_prompt])
+            concat_character_prompts.append(character_prompt)
+        if not has_character_payload:
+            concat_character_prompts.extend(ch["prompt"] for ch in extra_characters)
+        if concat_character_prompts:
+            prompt_for_payload = _join_prompt_parts([prompt, *concat_character_prompts])
         built_prompt = self.build_prompt(prompt_for_payload, settings)
 
         parameters = {
@@ -175,9 +196,15 @@ class NovelAIClient:
             char_captions = []
             negative_char_captions = []
             if has_character_payload:
-                char_captions.append(_character_caption(character_prompt, settings.artraccoon_character_position))
+                if character_prompt:
+                    char_captions.append(_character_caption(character_prompt, settings.artraccoon_character_position))
                 if character_uc:
                     negative_char_captions.append(_character_caption(character_uc, settings.artraccoon_character_position))
+                for character in extra_characters:
+                    if character["prompt"]:
+                        char_captions.append(_character_caption(character["prompt"], character["position"]))
+                    if character["uc"]:
+                        negative_char_captions.append(_character_caption(character["uc"], character["position"]))
             parameters["v4_prompt"] = {
                 "caption": {
                     "base_caption": built_prompt,
@@ -209,7 +236,7 @@ class NovelAIClient:
         if settings.seed != -1:
             parameters["seed"] = settings.seed
 
-        action = settings.nai_action or "generate"
+        action = "generate"
         if image_b64:
             action = "img2img"
             parameters.update({

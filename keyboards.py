@@ -1,5 +1,5 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config_defaults import MODELS, RESOLUTIONS, SAMPLERS, UC_PRESETS, QUICK_PRESETS, NOISE_SCHEDULES
+from config_defaults import MODELS, RESOLUTIONS, SAMPLERS, UC_PRESETS, QUICK_PRESETS, NOISE_SCHEDULES, MAX_EXTRA_CHARACTERS
 from app.nai.settings_registry import ADMIN_SITE_CLONE_FIELDS, BASIC_MENU_FIELDS
 
 def rows(buttons, width=2):
@@ -232,6 +232,7 @@ def admin_panel_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⚙️ Дефолты обычного режима", callback_data="admin:basic_defaults"),
         InlineKeyboardButton(text="🦝 ArtRaccoon Vibe", callback_data="admin:ar_vibe"),
         InlineKeyboardButton(text="🧪 NovelAI debug", callback_data="admin:nai_debug"),
+        InlineKeyboardButton(text="👥 Character+", callback_data="char:menu"),
         InlineKeyboardButton(text="📚 Словарь", callback_data="admin:dict"),
         InlineKeyboardButton(text="💎 Покупки / генерации", callback_data="admin:purchases"),
         InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users"),
@@ -240,6 +241,21 @@ def admin_panel_menu() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
 
+
+
+def characters_menu(characters: list | None = None) -> InlineKeyboardMarkup:
+    characters = characters if isinstance(characters, list) else []
+    buttons = []
+    if len(characters) < MAX_EXTRA_CHARACTERS:
+        buttons.append(InlineKeyboardButton(text="➕ Добавить персонажа", callback_data="char:add"))
+    buttons.append(InlineKeyboardButton(text="👁 Показать персонажей", callback_data="char:show"))
+    if characters:
+        for idx, item in enumerate(characters[:MAX_EXTRA_CHARACTERS], start=1):
+            label = str(item.get("prompt") or f"Персонаж {idx}").strip() if isinstance(item, dict) else f"Персонаж {idx}"
+            buttons.append(InlineKeyboardButton(text=f"🗑 {idx}. {label[:24]}", callback_data=f"char:delete:{idx - 1}"))
+        buttons.append(InlineKeyboardButton(text="🧹 Очистить всех", callback_data="char:clear"))
+    buttons.append(admin_back_button())
+    return InlineKeyboardMarkup(inline_keyboard=rows(buttons, 1))
 
 def admin_back_button() -> InlineKeyboardButton:
     return InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="admin:menu")

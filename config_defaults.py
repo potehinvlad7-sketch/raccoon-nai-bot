@@ -78,6 +78,8 @@ QUICK_PRESETS = {
     },
 }
 
+MAX_EXTRA_CHARACTERS = 6
+
 UC_PRESETS = {
     "none": "",
     "v4.5_full_heavy": "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page",
@@ -105,6 +107,7 @@ class UserSettings:
     artraccoon_character_uc: str = ""
     artraccoon_character_position: str = ""
     artraccoon_force_concat: bool = False
+    extra_characters: list | None = None
     seed: int = -1
     uc_preset: str = "v4.5_full_heavy"
     negative_prompt: str = ""

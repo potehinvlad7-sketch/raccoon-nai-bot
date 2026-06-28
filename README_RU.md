@@ -20,8 +20,14 @@ python bot.py
 - `/gen prompt` — генерация
 - `/settings` — настройки
 - `/prompt` — посмотреть текущий промт
-- `/raw` — показать raw overrides
+- `/raw` — показать raw overrides (только админы)
+- `/characters` — открыть админскую панель Character+
+- `/char` — короткая команда для Character+
 - `/help` — помощь
+
+## Character+
+
+Character+ — админская функция для добавления до 6 дополнительных персонажей с отдельными `prompt`, `uc` и `position`. Для моделей V4/V4.5 бот отправляет этих персонажей отдельными `char_captions` в `v4_prompt.caption.char_captions` и `v4_negative_prompt.caption.char_captions`. Для старых моделей, принудительного concat-режима или fallback-повтора после ошибки NovelAI персонажи объединяются с обычным prompt/negative prompt. Обычным пользователям команды `/characters` и `/char` скрыты и отвечают как неизвестные.
 
 ## Важно
 
