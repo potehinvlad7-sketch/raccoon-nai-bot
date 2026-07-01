@@ -6,7 +6,7 @@ from config_defaults import QUICK_PRESETS
 
 
 PAID_PLACEHOLDER_TEXT = "💎 Эта функция появится в платном режиме.\nСкоро добавим покупку генераций и расширенные настройки."
-DAILY_LIMIT_TEXT = "🕯️ На сегодня бесплатные генерации закончились.\nЗавтра появятся новые 10 попыток."
+DAILY_LIMIT_TEXT = "🕯️ На сегодня бесплатные генерации закончились.\nЗавтра появятся новые 50 попыток."
 GENERATION_STARTED_TEXT = "✨ Генерирую. Енот смешивает пиксели..."
 PROMPT_EMPTY_TEXT = "🖼️ Черновик пока пуст. Пришли идею картинки обычным сообщением."
 CANCEL_TEXT = "❌ Черновик очищен. Возвращаю в главное меню."
@@ -28,14 +28,14 @@ def start_text(remaining: int | None, daily_limit: int, is_admin: bool = False) 
     )
 
 
-def howto_text(remaining: int | None = None, daily_limit: int = 10) -> str:
+def howto_text(remaining: int | None = None, daily_limit: int = 50) -> str:
     remaining_line = f"\n\nСегодня осталось: {remaining}/{daily_limit}." if remaining is not None else ""
     return (
         "❓ <b>Помощь RaccoonNAI</b>\n\n"
         "• Напиши идею картинки одним сообщением.\n"
         "• Проверь черновик и нажми ✅ Генерировать.\n"
         "• ✏️ можно поправить, 🧹 очистить, ❌ отменить.\n"
-        "• Бесплатно: 10 генераций в день. ✨"
+        "• Бесплатно: 50 генераций в день. ✨"
         + remaining_line
     )
 
@@ -81,7 +81,7 @@ def generation_settings_summary(s) -> str:
     return f"📐 Размер: <code>{s.width}x{s.height}</code>\n👣 Шаги: <code>{s.steps}</code>\n🧲 CFG: <code>{s.scale}</code>\n🎲 Seed: <code>{seed}</code>\n🚫 Негатив: <code>{negative}</code>\n🧠 Модель: <code>{html.escape(s.model_name)}</code>"
 
 
-def prompt_preview_text(prompt: str, original: str = "", settings=None, remaining: int | None = None, daily_limit: int = 10) -> str:
+def prompt_preview_text(prompt: str, original: str = "", settings=None, remaining: int | None = None, daily_limit: int = 50) -> str:
     shown_prompt = prompt.strip()
     shown_original = original.strip() if original and original.strip() else ""
     remaining_line = f"\n\nСегодня осталось: {remaining}/{daily_limit}" if remaining is not None else ""

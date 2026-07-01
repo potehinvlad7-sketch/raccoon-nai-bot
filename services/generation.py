@@ -8,7 +8,7 @@ from config_defaults import MODELS, NOISE_SCHEDULES, SAMPLERS, UC_PRESETS, UserS
 from storage import get_config_value, get_settings, patch_settings
 
 SAFE_RESOLUTIONS = {(512, 768), (768, 1344), (832, 1216), (1024, 1024), (1216, 832)}
-DAILY_GENERATION_LIMIT = 10
+DAILY_GENERATION_LIMIT = 50
 NON_ADMIN_COOLDOWN_SECONDS = 60
 GENERATION_TIMEOUT_SECONDS = 180
 TMP_DIR = Path("data/tmp_images")
