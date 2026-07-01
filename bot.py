@@ -63,6 +63,9 @@ NOVELAI_TOKEN = (os.getenv("NOVELAI_TOKEN") or os.getenv("NAI_TOKEN") or "").str
 NAI_MODEL = os.getenv("NAI_MODEL", "").strip()
 PROXY_URL = os.getenv("PROXY_URL", "socks5://127.0.0.1:1080").strip()
 CHANNEL_URL = os.getenv("CHANNEL_URL", "").strip()
+SUPPORT_GROUP_ID_RAW = os.getenv("SUPPORT_GROUP_ID", "").strip()
+SUPPORT_GROUP_ID = int(SUPPORT_GROUP_ID_RAW) if SUPPORT_GROUP_ID_RAW.lstrip("-").isdigit() else None
+SUPPORT_URL = os.getenv("SUPPORT_URL", "").strip()
 
 ADMIN_IDS = [
     int(x.strip())
@@ -145,9 +148,101 @@ class GenState(StatesGroup):
     waiting_char_prompt = State()
     waiting_char_uc = State()
     waiting_char_position = State()
+    waiting_support_message = State()
+    waiting_admin_reply = State()
 
 def main_menu():
     return base_main_menu(CHANNEL_URL)
+
+
+SUPPORT_PROMPT_TEXT = (
+    "Напиши сообщение для администрации.\n\n"
+    "Можно отправить:\n"
+    "• текст\n"
+    "• фотографию\n"
+    "• документ\n"
+    "• видео\n"
+    "• голосовое сообщение\n\n"
+    "Для отмены используй /cancel"
+)
+
+DONATE_TEXT = (
+    "Спасибо за желание поддержать развитие Raccoon NAI Bot ❤️\n\n"
+    "Каждый донат помогает оплачивать серверы, улучшать функционал и добавлять новые возможности."
+)
+
+SUPPORTED_SUPPORT_CONTENT_TYPES = {"text", "photo", "document", "animation", "video", "audio", "voice", "sticker"}
+
+
+def donate_menu() -> InlineKeyboardMarkup:
+    buttons = []
+    if SUPPORT_URL:
+        buttons.append([InlineKeyboardButton(text="💖 Поддержать проект", url=SUPPORT_URL)])
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_support_menu(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✉️ Ответить", callback_data=f"support_reply:{user_id}"),
+        InlineKeyboardButton(text="❌ Закрыть", callback_data="support_close"),
+    ]])
+
+
+def support_identity_text(user: types.User, message: types.Message) -> str:
+    full_name = user.full_name or "—"
+    username = f"@{user.username}" if user.username else "—"
+    date = message.date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if message.date else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return (
+        "📩 <b>Новое обращение</b>\n\n"
+        f"👤 <b>Имя:</b>\n{html.escape(full_name)}\n\n"
+        f"🔗 <b>Username:</b>\n{html.escape(username)}\n\n"
+        f"🆔 <b>ID:</b>\n<code>{user.id}</code>\n\n"
+        f"🕒 <b>Date:</b>\n<code>{html.escape(date)}</code>"
+    )
+
+
+def _caption(prefix: str, message: types.Message) -> str:
+    original = message.caption or ""
+    return prefix if not original else f"{prefix}\n\n{original}"
+
+
+async def send_support_content(bot: Bot, chat_id: int, message: types.Message, *, prefix: str = "", reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    content_type = message.content_type
+    if content_type == "text":
+        text = message.text or ""
+        await bot.send_message(chat_id, f"{prefix}\n\n{text}" if prefix else text, reply_markup=reply_markup)
+    elif content_type == "photo":
+        await bot.send_photo(chat_id, message.photo[-1].file_id, caption=_caption(prefix, message) if prefix else message.caption, reply_markup=reply_markup)
+    elif content_type == "document":
+        await bot.send_document(chat_id, message.document.file_id, caption=_caption(prefix, message) if prefix else message.caption, reply_markup=reply_markup)
+    elif content_type == "animation":
+        await bot.send_animation(chat_id, message.animation.file_id, caption=_caption(prefix, message) if prefix else message.caption, reply_markup=reply_markup)
+    elif content_type == "video":
+        await bot.send_video(chat_id, message.video.file_id, caption=_caption(prefix, message) if prefix else message.caption, reply_markup=reply_markup)
+    elif content_type == "audio":
+        await bot.send_audio(chat_id, message.audio.file_id, caption=_caption(prefix, message) if prefix else message.caption, reply_markup=reply_markup)
+    elif content_type == "voice":
+        await bot.send_voice(chat_id, message.voice.file_id, caption=_caption(prefix, message) if prefix else message.caption, reply_markup=reply_markup)
+    elif content_type == "sticker":
+        if prefix:
+            await bot.send_message(chat_id, prefix)
+        await bot.send_sticker(chat_id, message.sticker.file_id, reply_markup=reply_markup)
+    else:
+        raise ValueError(f"Unsupported support content type: {content_type}")
+
+
+async def start_support_flow(message: types.Message, state: FSMContext) -> None:
+    await state.set_state(GenState.waiting_support_message)
+    await message.answer(SUPPORT_PROMPT_TEXT, reply_markup=main_menu())
+
+
+async def send_donate_message(message: types.Message) -> None:
+    if not SUPPORT_URL:
+        await message.answer("Ссылка для поддержки проекта пока не настроена.", reply_markup=main_menu())
+        return
+    await message.answer(DONATE_TEXT, reply_markup=donate_menu())
+
 
 def basic_defaults_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -573,6 +668,126 @@ async def show_admin_panel(message: types.Message) -> None:
         await message.answer("Команда не найдена.")
         return
     await message.answer(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_menu())
+
+
+
+@dp.message(Command("chat_id"))
+async def chat_id_cmd(message: types.Message):
+    await message.answer(
+        f"Chat ID: <code>{message.chat.id}</code>\n"
+        f"Chat type: <code>{html.escape(message.chat.type)}</code>",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("support"))
+async def support_cmd(message: types.Message, state: FSMContext):
+    log.info("support message received: support flow started by user %s", message.from_user.id if message.from_user else "unknown")
+    await start_support_flow(message, state)
+
+
+@dp.callback_query(F.data == "support:start")
+async def cb_support_start(call: types.CallbackQuery, state: FSMContext):
+    log.info("support message received: support flow started by user %s", call.from_user.id)
+    await state.set_state(GenState.waiting_support_message)
+    await call.message.answer(SUPPORT_PROMPT_TEXT, reply_markup=main_menu())
+    await call.answer()
+
+
+@dp.message(Command("donate"))
+async def donate_cmd(message: types.Message):
+    await send_donate_message(message)
+
+
+@dp.callback_query(F.data == "donate:open")
+async def cb_donate(call: types.CallbackQuery):
+    await call.message.answer(DONATE_TEXT, reply_markup=donate_menu())
+    await call.answer()
+
+
+@dp.message(GenState.waiting_support_message)
+async def support_message_input(message: types.Message, state: FSMContext):
+    if message.from_user is None:
+        return
+    if message.content_type not in SUPPORTED_SUPPORT_CONTENT_TYPES:
+        await message.answer("Не могу отправить этот тип сообщения. Пришли текст, фото, документ, видео, аудио, голосовое или стикер.\n\nДля отмены используй /cancel")
+        return
+
+    log.info("support message received from user %s type=%s", message.from_user.id, message.content_type)
+    admin_markup = admin_support_menu(message.from_user.id)
+    delivered_admins = 0
+    for admin_id in ADMIN_IDS:
+        try:
+            await message.bot.send_message(admin_id, support_identity_text(message.from_user, message), parse_mode="HTML")
+            await send_support_content(message.bot, admin_id, message, reply_markup=admin_markup)
+            delivered_admins += 1
+        except Exception:
+            log.exception("support errors: failed to deliver support message to admin %s", admin_id)
+
+    if SUPPORT_GROUP_ID is None:
+        log.warning("support errors: SUPPORT_GROUP_ID is not configured; skipping anonymous group delivery")
+    else:
+        try:
+            await send_support_content(message.bot, SUPPORT_GROUP_ID, message, prefix="📩 Анонимное обращение")
+            log.info("support delivered to group %s for user %s", SUPPORT_GROUP_ID, message.from_user.id)
+        except Exception:
+            log.exception("support errors: failed to deliver support message to group %s", SUPPORT_GROUP_ID)
+
+    await state.clear()
+    if delivered_admins:
+        log.info("support delivered to %s admins for user %s", delivered_admins, message.from_user.id)
+        await message.answer(
+            "✅ Сообщение успешно отправлено администрации.\n\nМы постараемся ответить как можно скорее.",
+            reply_markup=main_menu(),
+        )
+    else:
+        await message.answer("Не удалось отправить сообщение администрации. Попробуй позже.", reply_markup=main_menu())
+
+
+@dp.callback_query(F.data.startswith("support_reply:"))
+async def cb_support_reply(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    target_user_id = int(call.data.split(":", 1)[1])
+    await state.set_state(GenState.waiting_admin_reply)
+    await state.update_data(support_reply_user_id=target_user_id)
+    await call.message.answer("Введите ответ пользователю.")
+    await call.answer()
+
+
+@dp.callback_query(F.data == "support_close")
+async def cb_support_close(call: types.CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Команда не найдена.", show_alert=True)
+        return
+    await call.answer("Закрыто")
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+
+
+@dp.message(GenState.waiting_admin_reply)
+async def admin_support_reply_input(message: types.Message, state: FSMContext):
+    if message.from_user is None or message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        await message.answer("Команда не найдена.")
+        return
+    data = await state.get_data()
+    target_user_id = int(data.get("support_reply_user_id", 0) or 0)
+    text = (message.text or message.caption or "").strip()
+    if not target_user_id or not text:
+        await message.answer("Введите текстовый ответ пользователю или /cancel.")
+        return
+    try:
+        await message.bot.send_message(target_user_id, "💬 Ответ администрации\n\n" + text)
+        log.info("admin replied to support user %s by admin %s", target_user_id, message.from_user.id)
+        await state.clear()
+        await message.answer("✅ Ответ отправлен пользователю.", reply_markup=admin_panel_menu())
+    except Exception:
+        log.exception("support errors: failed to send admin reply to user %s", target_user_id)
+        await message.answer("Не удалось отправить ответ пользователю. Попробуй позже.")
 
 
 @dp.message(Command("admin", "xxx"))
