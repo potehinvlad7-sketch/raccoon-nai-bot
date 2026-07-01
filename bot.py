@@ -87,7 +87,29 @@ class UserIdentityMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+def _message_has_command(message: types.Message) -> bool:
+    if not message.text and not message.caption:
+        return False
+    entities = message.entities if message.text else message.caption_entities
+    return any(entity.type == "bot_command" for entity in entities or [])
+
+
+class GroupMessageGuardMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: types.Message, data):
+        if event.chat.type == "private":
+            return await handler(event, data)
+        if _message_has_command(event):
+            return await handler(event, data)
+
+        state: FSMContext | None = data.get("state")
+        if state is not None and await state.get_state() is not None:
+            return await handler(event, data)
+
+        return None
+
+
 dp.message.middleware(UserIdentityMiddleware())
+dp.message.middleware(GroupMessageGuardMiddleware())
 dp.callback_query.middleware(UserIdentityMiddleware())
 nai = NovelAIClient(NOVELAI_TOKEN, default_model=NAI_MODEL, proxy_url=PROXY_URL)
 
