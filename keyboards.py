@@ -12,6 +12,8 @@ def main_menu(channel_url: str = "") -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(text="🎨 Новый промпт", callback_data="menu:gen"),
         InlineKeyboardButton(text="💎 Купить генерации", callback_data="paid:buy"),
+        InlineKeyboardButton(text="💬 Связь с админом", callback_data="support:start"),
+        InlineKeyboardButton(text="💖 Поддержать проект", callback_data="donate:open"),
         InlineKeyboardButton(text="❓ Помощь", callback_data="menu:howto"),
     ]
     if channel_url:
