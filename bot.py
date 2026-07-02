@@ -599,7 +599,7 @@ def build_admin_stats() -> dict:
     total_generations = generations_today = free_used = 0
     active_today: set[str] = set()
     active_7d: set[str] = set()
-    total_paid_balance = total_favorites = total_history = 0
+    total_paid_balance = total_paid_used = total_favorites = total_history = 0
     vibe_users = advanced_users = pending_drafts = 0
     by_user: list[tuple[str, int]] = []
     model_counts: dict[str, int] = {}
@@ -615,6 +615,7 @@ def build_admin_stats() -> dict:
         total_favorites += len(favorites)
         free_used += int(user.get("free_daily_used", user.get("daily_generation_count", 0)) or 0)
         total_paid_balance += int(user.get("paid_generations_balance", 0) or 0)
+        total_paid_used += int(user.get("paid_generations_used", 0) or 0)
         if user.get("artraccoon_vibe_enabled"):
             vibe_users += 1
         if user.get("pro_mode") or user.get("artraccoon_mode") or uid.isdigit() and int(uid) in ADMIN_IDS:
@@ -646,7 +647,7 @@ def build_admin_stats() -> dict:
     return {
         "total_users": total_users, "users_with_username": sum(1 for raw in users.values() if isinstance(raw, dict) and str(raw.get("username") or "").strip()), "users_without_username": sum(1 for raw in users.values() if not (isinstance(raw, dict) and str(raw.get("username") or "").strip())), "total_generations": total_generations, "generations_today": generations_today,
         "active_today": len(active_today), "active_7d": len(active_7d), "free_used": free_used,
-        "paid_used": None, "paid_balance": total_paid_balance, "vibe_users": vibe_users, "advanced_users": advanced_users,
+        "paid_used": total_paid_used, "paid_balance": total_paid_balance, "vibe_users": vibe_users, "advanced_users": advanced_users,
         "pending_drafts": pending_drafts, "favorites": total_favorites, "history": total_history,
         "avg": total_generations / total_users if total_users else 0,
         "top_users": sorted(by_user, key=lambda x: x[1], reverse=True)[:10],
@@ -670,7 +671,7 @@ def format_admin_stats(stats: dict) -> str:
         f"🔥 Active users today: <code>{stats['active_today']}</code>\n"
         f"📈 Active users last 7 days: <code>{stats['active_7d']}</code>\n"
         f"🎁 Free generations used: <code>{stats['free_used']}</code>\n"
-        "💎 Paid generations used: <code>not implemented</code>\n"
+        f"💎 Paid generations used: <code>{stats['paid_used']}</code>\n"
         f"📦 Total remaining paid generation balance: <code>{stats['paid_balance']}</code>\n"
         f"🦝 Users with ArtRaccoon Vibe enabled: <code>{stats['vibe_users']}</code>\n"
         f"⚙️ Users with advanced/admin mode enabled: <code>{stats['advanced_users']}</code>\n"
@@ -1457,6 +1458,7 @@ def _admin_user_summary(user_id: int) -> str:
         f"🔗 Username: <code>@{html.escape(username) if username != '-' else '-'}</code>\n"
         f"👤 Full name: <code>{html.escape(full_name)}</code>\n"
         f"💎 Balance: <code>{int(raw.get('paid_generations_balance', 0) or 0)}</code>\n"
+        f"💎 Paid generations used: <code>{int(raw.get('paid_generations_used', 0) or 0)}</code>\n"
         f"🖼 Total generations: <code>{len(history)}</code>\n"
         f"📅 Daily usage: <code>{daily}</code>\n"
         f"📚 History count: <code>{len(history)}</code>\n"

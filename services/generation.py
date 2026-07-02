@@ -125,15 +125,24 @@ def daily_count_for(s) -> int:
 def remaining_generations(user_id: int, admin_ids: list[int]) -> int | None:
     if user_id in admin_ids:
         return None
-    return max(0, DAILY_GENERATION_LIMIT - daily_count_for(get_settings(user_id)))
+    s = get_settings(user_id)
+    free_remaining = max(0, DAILY_GENERATION_LIMIT - daily_count_for(s))
+    paid_balance = max(0, int(s.paid_generations_balance or 0))
+    return free_remaining + paid_balance
 
 
 def mark_generation_started(user_id: int, admin_ids: list[int]) -> None:
     s = get_settings(user_id)
     updates = {"last_generation_started_at": datetime.now(timezone.utc).isoformat()}
     if user_id not in admin_ids:
-        used = daily_count_for(s) + 1
-        updates.update({"daily_generation_date": today_key(), "daily_generation_count": used, "free_daily_date": today_key(), "free_daily_used": used})
+        free_used = daily_count_for(s)
+        if free_used < DAILY_GENERATION_LIMIT:
+            used = free_used + 1
+            updates.update({"daily_generation_date": today_key(), "daily_generation_count": used, "free_daily_date": today_key(), "free_daily_used": used})
+        else:
+            balance = max(0, int(s.paid_generations_balance or 0))
+            updates["paid_generations_balance"] = max(0, balance - 1)
+            updates["paid_generations_used"] = int(s.paid_generations_used or 0) + (1 if balance > 0 else 0)
     updates["total_generations_used"] = int(s.total_generations_used or 0) + 1
     patch_settings(user_id, **updates)
 

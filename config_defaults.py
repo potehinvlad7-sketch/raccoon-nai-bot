@@ -127,6 +127,7 @@ class UserSettings:
     daily_generation_date: str = ""
     last_generation_started_at: str = ""
     paid_generations_balance: int = 0
+    paid_generations_used: int = 0
     free_daily_used: int = 0
     free_daily_date: str = ""
     total_generations_used: int = 0
